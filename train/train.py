@@ -143,6 +143,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal Loss focusing parameter gamma '
                              '(effective only when --loss_type=focal)')
+    parser.add_argument('--label_smoothing', type=float, default=0.0,
+                        help='Label smoothing factor (0=disabled, 0.05~0.1 recommended)')
+
+    # Learning rate schedule.
+    parser.add_argument('--warmup_steps', type=int, default=0,
+                        help='Number of warmup steps for LR scheduler (0=disabled)')
+
+    # Negative sampling.
+    parser.add_argument('--neg_sample_ratio', type=float, default=1.0,
+                        help='Negative sampling ratio (1.0=keep all, 0.25=1:4 pos:neg)')
 
     # Sparse optimizer.
     parser.add_argument('--sparse_lr', type=float, default=0.05,
@@ -340,6 +350,9 @@ def main() -> None:
         loss_type=args.loss_type,
         focal_alpha=args.focal_alpha,
         focal_gamma=args.focal_gamma,
+        label_smoothing=args.label_smoothing,
+        warmup_steps=args.warmup_steps,
+        neg_sample_ratio=args.neg_sample_ratio,
         sparse_lr=args.sparse_lr,
         sparse_weight_decay=args.sparse_weight_decay,
         reinit_sparse_after_epoch=args.reinit_sparse_after_epoch,

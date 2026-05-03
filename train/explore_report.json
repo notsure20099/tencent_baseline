@@ -1,0 +1,1077 @@
+{
+  "overview": {
+    "data_dir": "/data_ams/industrial_training_data",
+    "files": 1000,
+    "row_groups": 1044,
+    "total_rows": 2099956,
+    "sampled_rows": 212753,
+    "sampled_rgs": 104,
+    "sample_ratio": 0.1,
+    "columns": 120,
+    "user_int": {
+      "count": 46,
+      "total_dim": 476
+    },
+    "item_int": {
+      "count": 14,
+      "total_dim": 33
+    },
+    "user_dense": {
+      "count": 10,
+      "total_dim": 983
+    },
+    "item_dense": {
+      "count": 0,
+      "total_dim": 0
+    },
+    "seq_domains": {
+      "count": 4,
+      "names": [
+        "seq_a",
+        "seq_b",
+        "seq_c",
+        "seq_d"
+      ]
+    }
+  },
+  "label": {
+    "total": 212753,
+    "positive": 21626,
+    "positive_pct": 10.1648,
+    "negative": 191127,
+    "negative_pct": 89.8352,
+    "ratio": "1:8.8"
+  },
+  "user_int_features": [
+    {
+      "fid": 1,
+      "vocab": 6,
+      "dim": 1,
+      "zero_rate": 0.0001,
+      "mean_nonzero": 3.6,
+      "max": 5,
+      "oob_count": 0
+    },
+    {
+      "fid": 3,
+      "vocab": 1916,
+      "dim": 1,
+      "zero_rate": 0.0259,
+      "mean_nonzero": 956.2,
+      "max": 1839,
+      "oob_count": 0
+    },
+    {
+      "fid": 4,
+      "vocab": 1018,
+      "dim": 1,
+      "zero_rate": 0.0259,
+      "mean_nonzero": 485.1,
+      "max": 991,
+      "oob_count": 0
+    },
+    {
+      "fid": 15,
+      "vocab": 1173,
+      "dim": 26,
+      "zero_rate": 0.8712,
+      "mean_nonzero": 546.2,
+      "max": 1172,
+      "oob_count": 0
+    },
+    {
+      "fid": 48,
+      "vocab": 101,
+      "dim": 1,
+      "zero_rate": 0.0015,
+      "mean_nonzero": 53.4,
+      "max": 98,
+      "oob_count": 0
+    },
+    {
+      "fid": 49,
+      "vocab": 3,
+      "dim": 1,
+      "zero_rate": 0.0044,
+      "mean_nonzero": 1.6,
+      "max": 2,
+      "oob_count": 0
+    },
+    {
+      "fid": 50,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.0022,
+      "mean_nonzero": 1.9,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 51,
+      "vocab": 160,
+      "dim": 1,
+      "zero_rate": 0.0005,
+      "mean_nonzero": 56.1,
+      "max": 154,
+      "oob_count": 0
+    },
+    {
+      "fid": 52,
+      "vocab": 193,
+      "dim": 1,
+      "zero_rate": 0.0005,
+      "mean_nonzero": 88.4,
+      "max": 187,
+      "oob_count": 0
+    },
+    {
+      "fid": 53,
+      "vocab": 563,
+      "dim": 1,
+      "zero_rate": 0.0005,
+      "mean_nonzero": 284.3,
+      "max": 558,
+      "oob_count": 0
+    },
+    {
+      "fid": 54,
+      "vocab": 2862,
+      "dim": 1,
+      "zero_rate": 0.3179,
+      "mean_nonzero": 1457.1,
+      "max": 2858,
+      "oob_count": 0
+    },
+    {
+      "fid": 55,
+      "vocab": 44,
+      "dim": 1,
+      "zero_rate": 0.0137,
+      "mean_nonzero": 28.9,
+      "max": 43,
+      "oob_count": 0
+    },
+    {
+      "fid": 56,
+      "vocab": 1456,
+      "dim": 1,
+      "zero_rate": 0.0137,
+      "mean_nonzero": 743.3,
+      "max": 1436,
+      "oob_count": 0
+    },
+    {
+      "fid": 57,
+      "vocab": 257,
+      "dim": 1,
+      "zero_rate": 0.0219,
+      "mean_nonzero": 128.9,
+      "max": 252,
+      "oob_count": 0
+    },
+    {
+      "fid": 58,
+      "vocab": 3,
+      "dim": 1,
+      "zero_rate": 0.1586,
+      "mean_nonzero": 1.8,
+      "max": 2,
+      "oob_count": 0
+    },
+    {
+      "fid": 59,
+      "vocab": 17,
+      "dim": 1,
+      "zero_rate": 0.1586,
+      "mean_nonzero": 7.4,
+      "max": 14,
+      "oob_count": 0
+    },
+    {
+      "fid": 60,
+      "vocab": 3,
+      "dim": 2,
+      "zero_rate": 0.7695,
+      "mean_nonzero": 1.5,
+      "max": 2,
+      "oob_count": 0
+    },
+    {
+      "fid": 62,
+      "vocab": 11,
+      "dim": 7,
+      "zero_rate": 0.6919,
+      "mean_nonzero": 5.8,
+      "max": 10,
+      "oob_count": 0
+    },
+    {
+      "fid": 63,
+      "vocab": 49,
+      "dim": 20,
+      "zero_rate": 0.8817,
+      "mean_nonzero": 28.6,
+      "max": 47,
+      "oob_count": 0
+    },
+    {
+      "fid": 64,
+      "vocab": 51,
+      "dim": 33,
+      "zero_rate": 0.8792,
+      "mean_nonzero": 23.0,
+      "max": 50,
+      "oob_count": 0
+    },
+    {
+      "fid": 65,
+      "vocab": 447,
+      "dim": 116,
+      "zero_rate": 0.9483,
+      "mean_nonzero": 212.4,
+      "max": 442,
+      "oob_count": 0
+    },
+    {
+      "fid": 66,
+      "vocab": 1485,
+      "dim": 201,
+      "zero_rate": 0.9578,
+      "mean_nonzero": 782.7,
+      "max": 1472,
+      "oob_count": 0
+    },
+    {
+      "fid": 80,
+      "vocab": 13,
+      "dim": 6,
+      "zero_rate": 0.8319,
+      "mean_nonzero": 7.6,
+      "max": 12,
+      "oob_count": 0
+    },
+    {
+      "fid": 82,
+      "vocab": 24,
+      "dim": 1,
+      "zero_rate": 0.2226,
+      "mean_nonzero": 9.0,
+      "max": 23,
+      "oob_count": 0
+    },
+    {
+      "fid": 86,
+      "vocab": 252,
+      "dim": 1,
+      "zero_rate": 0.7101,
+      "mean_nonzero": 92.6,
+      "max": 245,
+      "oob_count": 0
+    },
+    {
+      "fid": 89,
+      "vocab": 10,
+      "dim": 10,
+      "zero_rate": 0.1356,
+      "mean_nonzero": 5.0,
+      "max": 9,
+      "oob_count": 0
+    },
+    {
+      "fid": 90,
+      "vocab": 10,
+      "dim": 10,
+      "zero_rate": 0.1635,
+      "mean_nonzero": 5.0,
+      "max": 9,
+      "oob_count": 0
+    },
+    {
+      "fid": 91,
+      "vocab": 10,
+      "dim": 10,
+      "zero_rate": 0.5426,
+      "mean_nonzero": 5.0,
+      "max": 9,
+      "oob_count": 0
+    },
+    {
+      "fid": 92,
+      "vocab": 3,
+      "dim": 1,
+      "zero_rate": 0.5033,
+      "mean_nonzero": 1.4,
+      "max": 2,
+      "oob_count": 0
+    },
+    {
+      "fid": 93,
+      "vocab": 38,
+      "dim": 1,
+      "zero_rate": 0.2055,
+      "mean_nonzero": 14.7,
+      "max": 37,
+      "oob_count": 0
+    },
+    {
+      "fid": 94,
+      "vocab": 7,
+      "dim": 1,
+      "zero_rate": 0.5287,
+      "mean_nonzero": 3.6,
+      "max": 6,
+      "oob_count": 0
+    },
+    {
+      "fid": 95,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.3681,
+      "mean_nonzero": 2.7,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 96,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.7178,
+      "mean_nonzero": 1.8,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 97,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.3045,
+      "mean_nonzero": 1.5,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 98,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.0913,
+      "mean_nonzero": 2.7,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 99,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.8107,
+      "mean_nonzero": 2.9,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 100,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.8479,
+      "mean_nonzero": 1.9,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 101,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.9173,
+      "mean_nonzero": 2.9,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 102,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.894,
+      "mean_nonzero": 1.1,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 103,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.8829,
+      "mean_nonzero": 2.7,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 104,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.3888,
+      "mean_nonzero": 2.5,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 105,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.3259,
+      "mean_nonzero": 2.3,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 106,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.1396,
+      "mean_nonzero": 1.8,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 107,
+      "vocab": 4,
+      "dim": 1,
+      "zero_rate": 0.3483,
+      "mean_nonzero": 1.1,
+      "max": 3,
+      "oob_count": 0
+    },
+    {
+      "fid": 108,
+      "vocab": 8,
+      "dim": 1,
+      "zero_rate": 0.5256,
+      "mean_nonzero": 5.5,
+      "max": 7,
+      "oob_count": 0
+    },
+    {
+      "fid": 109,
+      "vocab": 8,
+      "dim": 1,
+      "zero_rate": 0.875,
+      "mean_nonzero": 3.3,
+      "max": 7,
+      "oob_count": 0
+    }
+  ],
+  "item_int_features": [
+    {
+      "fid": 5,
+      "vocab": 309,
+      "dim": 1,
+      "zero_rate": 0.0007,
+      "mean_nonzero": 126.8,
+      "max": 294,
+      "oob_count": 0
+    },
+    {
+      "fid": 6,
+      "vocab": 943,
+      "dim": 1,
+      "zero_rate": 0.0432,
+      "mean_nonzero": 422.7,
+      "max": 896,
+      "oob_count": 0
+    },
+    {
+      "fid": 7,
+      "vocab": 2533,
+      "dim": 1,
+      "zero_rate": 0.1498,
+      "mean_nonzero": 1176.0,
+      "max": 2379,
+      "oob_count": 0
+    },
+    {
+      "fid": 8,
+      "vocab": 2213,
+      "dim": 1,
+      "zero_rate": 0.6172,
+      "mean_nonzero": 989.7,
+      "max": 2109,
+      "oob_count": 0
+    },
+    {
+      "fid": 9,
+      "vocab": 42,
+      "dim": 1,
+      "zero_rate": 0.0007,
+      "mean_nonzero": 19.8,
+      "max": 41,
+      "oob_count": 0
+    },
+    {
+      "fid": 10,
+      "vocab": 318,
+      "dim": 1,
+      "zero_rate": 0.0007,
+      "mean_nonzero": 159.7,
+      "max": 305,
+      "oob_count": 0
+    },
+    {
+      "fid": 11,
+      "vocab": 23832,
+      "dim": 20,
+      "zero_rate": 0.9099,
+      "mean_nonzero": 11298.2,
+      "max": 21621,
+      "oob_count": 0
+    },
+    {
+      "fid": 12,
+      "vocab": 2533,
+      "dim": 1,
+      "zero_rate": 0.1498,
+      "mean_nonzero": 1111.3,
+      "max": 2378,
+      "oob_count": 0
+    },
+    {
+      "fid": 13,
+      "vocab": 9,
+      "dim": 1,
+      "zero_rate": 0.0007,
+      "mean_nonzero": 4.6,
+      "max": 8,
+      "oob_count": 0
+    },
+    {
+      "fid": 16,
+      "vocab": 25495,
+      "dim": 1,
+      "zero_rate": 0.001,
+      "mean_nonzero": 11159.1,
+      "max": 22878,
+      "oob_count": 0
+    },
+    {
+      "fid": 81,
+      "vocab": 3,
+      "dim": 1,
+      "zero_rate": 0.7078,
+      "mean_nonzero": 1.4,
+      "max": 2,
+      "oob_count": 0
+    },
+    {
+      "fid": 83,
+      "vocab": 32,
+      "dim": 1,
+      "zero_rate": 0.8862,
+      "mean_nonzero": 16.7,
+      "max": 31,
+      "oob_count": 0
+    },
+    {
+      "fid": 84,
+      "vocab": 234,
+      "dim": 1,
+      "zero_rate": 0.8862,
+      "mean_nonzero": 133.0,
+      "max": 226,
+      "oob_count": 0
+    },
+    {
+      "fid": 85,
+      "vocab": 1084,
+      "dim": 1,
+      "zero_rate": 0.8862,
+      "mean_nonzero": 474.1,
+      "max": 1019,
+      "oob_count": 0
+    }
+  ],
+  "user_dense_features": [
+    {
+      "fid": 61,
+      "dim": 256,
+      "mean": -0.000805,
+      "std": 0.062312,
+      "min": -2.79709,
+      "max": 3.243134,
+      "zero_rate": 0.0014
+    },
+    {
+      "fid": 62,
+      "dim": 7,
+      "mean": 48050.952643,
+      "std": 248621.753892,
+      "min": 0.0,
+      "max": 53264052.0,
+      "zero_rate": 0.6919
+    },
+    {
+      "fid": 63,
+      "dim": 20,
+      "mean": 18535.055379,
+      "std": 158286.375868,
+      "min": 0.0,
+      "max": 49416544.0,
+      "zero_rate": 0.8769
+    },
+    {
+      "fid": 64,
+      "dim": 33,
+      "mean": 16455.393757,
+      "std": 159538.942767,
+      "min": 0.0,
+      "max": 53264052.0,
+      "zero_rate": 0.8792
+    },
+    {
+      "fid": 65,
+      "dim": 116,
+      "mean": 8425.436821,
+      "std": 140569.873673,
+      "min": 0.0,
+      "max": 218424400.0,
+      "zero_rate": 0.9483
+    },
+    {
+      "fid": 66,
+      "dim": 201,
+      "mean": 11387.675178,
+      "std": 196426.349351,
+      "min": 0.0,
+      "max": 218424400.0,
+      "zero_rate": 0.9578
+    },
+    {
+      "fid": 87,
+      "dim": 320,
+      "mean": -0.003796,
+      "std": 0.106277,
+      "min": -0.7449,
+      "max": 0.7069,
+      "zero_rate": 0.6382
+    },
+    {
+      "fid": 89,
+      "dim": 10,
+      "mean": -4.2e-05,
+      "std": 0.309902,
+      "min": -0.8906,
+      "max": 0.9137,
+      "zero_rate": 0.0425
+    },
+    {
+      "fid": 90,
+      "dim": 10,
+      "mean": -4.3e-05,
+      "std": 0.304864,
+      "min": -0.8906,
+      "max": 0.912,
+      "zero_rate": 0.0735
+    },
+    {
+      "fid": 91,
+      "dim": 10,
+      "mean": -1.2e-05,
+      "std": 0.225435,
+      "min": -0.9249,
+      "max": 0.9206,
+      "zero_rate": 0.4928
+    }
+  ],
+  "sequence_features": [
+    {
+      "domain": "seq_a",
+      "prefix": "domain_a_seq",
+      "ts_fid": 39,
+      "feature_count": 9,
+      "sequence_count": 212753,
+      "seq_len_mean": 749.3,
+      "seq_len_min": 0.0,
+      "seq_len_max": 2000.0,
+      "seq_len_p50": 550.0,
+      "seq_len_p90": 1891.0,
+      "seq_len_p95": 1958.0,
+      "seq_len_p99": 1985.0,
+      "features": [
+        {
+          "fid": 38,
+          "vocab": 889551,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 39,
+          "vocab": 0,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 40,
+          "vocab": 19,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 41,
+          "vocab": 12,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 42,
+          "vocab": 1028,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 43,
+          "vocab": 3498,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 44,
+          "vocab": 13692,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 45,
+          "vocab": 8175,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 46,
+          "vocab": 18,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        }
+      ]
+    },
+    {
+      "domain": "seq_b",
+      "prefix": "domain_b_seq",
+      "ts_fid": 67,
+      "feature_count": 14,
+      "sequence_count": 212753,
+      "seq_len_mean": 751.1,
+      "seq_len_min": 0.0,
+      "seq_len_max": 2000.0,
+      "seq_len_p50": 529.0,
+      "seq_len_p90": 1917.0,
+      "seq_len_p95": 1960.0,
+      "seq_len_p99": 1988.0,
+      "features": [
+        {
+          "fid": 67,
+          "vocab": 0,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 68,
+          "vocab": 28,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 69,
+          "vocab": 85946394,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 70,
+          "vocab": 740,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 71,
+          "vocab": 2729,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 72,
+          "vocab": 10572,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 73,
+          "vocab": 6985,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 74,
+          "vocab": 531477,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 75,
+          "vocab": 31,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 76,
+          "vocab": 143746,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 77,
+          "vocab": 168,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 78,
+          "vocab": 4340,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 79,
+          "vocab": 11623,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 88,
+          "vocab": 249080,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        }
+      ]
+    },
+    {
+      "domain": "seq_c",
+      "prefix": "domain_c_seq",
+      "ts_fid": 27,
+      "feature_count": 12,
+      "sequence_count": 212753,
+      "seq_len_mean": 521.5,
+      "seq_len_min": 0.0,
+      "seq_len_max": 3999.0,
+      "seq_len_p50": 368.0,
+      "seq_len_p90": 1084.0,
+      "seq_len_p95": 1468.0,
+      "seq_len_p99": 2457.0,
+      "features": [
+        {
+          "fid": 27,
+          "vocab": 0,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 28,
+          "vocab": 75,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 29,
+          "vocab": 6551861,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 30,
+          "vocab": 864,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 31,
+          "vocab": 6896,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 32,
+          "vocab": 7,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 33,
+          "vocab": 5,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 34,
+          "vocab": 1292419,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 35,
+          "vocab": 2998,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 36,
+          "vocab": 1134859,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 37,
+          "vocab": 9697,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 47,
+          "vocab": 125610776,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        }
+      ]
+    },
+    {
+      "domain": "seq_d",
+      "prefix": "domain_d_seq",
+      "ts_fid": 26,
+      "feature_count": 10,
+      "sequence_count": 212753,
+      "seq_len_mean": 2406.8,
+      "seq_len_min": 0.0,
+      "seq_len_max": 4000.0,
+      "seq_len_p50": 2667.0,
+      "seq_len_p90": 3782.0,
+      "seq_len_p95": 3842.0,
+      "seq_len_p99": 3923.0,
+      "features": [
+        {
+          "fid": 17,
+          "vocab": 5,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 18,
+          "vocab": 980,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 19,
+          "vocab": 3469,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 20,
+          "vocab": 11510,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 21,
+          "vocab": 5156,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 22,
+          "vocab": 443147,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 23,
+          "vocab": 630399,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 24,
+          "vocab": 626,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 25,
+          "vocab": 15,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        },
+        {
+          "fid": 26,
+          "vocab": 0,
+          "oob_count": 0,
+          "oob_rate": 0.0,
+          "status": "OK"
+        }
+      ]
+    }
+  ],
+  "timestamp": {
+    "count": 212753,
+    "min_ts": 1772248238,
+    "min_datetime": "2026-02-28 11:10:38",
+    "max_ts": 1772588965,
+    "max_datetime": "2026-03-04 09:49:25",
+    "range_days": 3.9
+  },
+  "run_info": {
+    "elapsed_seconds": 270.9,
+    "processed_rows": 212753,
+    "processed_rgs": 104,
+    "output_lines": 165
+  },
+  "report_time": "2026-05-02 01:05:44"
+}

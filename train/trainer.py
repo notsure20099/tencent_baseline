@@ -8,6 +8,8 @@ import os
 import glob
 import shutil
 import logging
+import math
+import time
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -20,6 +22,16 @@ from sklearn.metrics import roc_auc_score
 
 from utils import sigmoid_focal_loss, EarlyStopping
 from model import ModelInput
+
+
+def _warmup_cosine_lr(step: int, warmup_steps: int, t_max: int) -> float:
+    """Linear warmup then cosine decay, with a 0.01 floor after t_max."""
+    if step < warmup_steps:
+        return step / max(1, warmup_steps)
+    if step >= t_max:
+        return 0.01
+    progress = (step - warmup_steps) / max(1, t_max - warmup_steps)
+    return 0.01 + 0.5 * 0.99 * (1.0 + math.cos(math.pi * progress))
 
 
 class PCVRHyFormerRankingTrainer:
@@ -48,6 +60,9 @@ class PCVRHyFormerRankingTrainer:
         loss_type: str = 'bce',
         focal_alpha: float = 0.1,
         focal_gamma: float = 2.0,
+        label_smoothing: float = 0.0,
+        warmup_steps: int = 0,
+        neg_sample_ratio: float = 1.0,
         sparse_lr: float = 0.05,
         sparse_weight_decay: float = 0.0,
         reinit_sparse_after_epoch: int = 1,
@@ -100,6 +115,10 @@ class PCVRHyFormerRankingTrainer:
         self.loss_type: str = loss_type
         self.focal_alpha: float = focal_alpha
         self.focal_gamma: float = focal_gamma
+        self.label_smoothing: float = label_smoothing
+        self.neg_sample_ratio: float = neg_sample_ratio
+        self.warmup_steps: int = warmup_steps
+        self.lr: float = lr
         self.reinit_sparse_after_epoch: int = reinit_sparse_after_epoch
         self.reinit_cardinality_threshold: int = reinit_cardinality_threshold
         self.sparse_lr: float = sparse_lr
@@ -108,8 +127,25 @@ class PCVRHyFormerRankingTrainer:
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
 
+        # LR scheduler: linear warmup + cosine decay (applied per step)
+        self.dense_scheduler = None
+        self.sparse_scheduler = None
+        self._cosine_t_max = 0
+        if warmup_steps > 0:
+            cosine_steps = warmup_steps * 50
+            self._cosine_t_max = warmup_steps + cosine_steps
+            self.dense_scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.dense_optimizer,
+                lambda step: _warmup_cosine_lr(step, warmup_steps, self._cosine_t_max))
+            if self.sparse_optimizer is not None:
+                self.sparse_scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    self.sparse_optimizer,
+                    lambda step: _warmup_cosine_lr(step, warmup_steps, self._cosine_t_max))
+
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
+                     f"label_smoothing={label_smoothing}, warmup_steps={warmup_steps}, "
+                     f"neg_sample_ratio={neg_sample_ratio}, "
                      f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
@@ -286,6 +322,37 @@ class PCVRHyFormerRankingTrainer:
             self._save_step_checkpoint(
                 total_step, is_best=True, skip_model_file=True)
 
+    @torch.no_grad()
+    def _filter_negatives(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep all positives + random subset of negatives to achieve target pos:neg ratio."""
+        if self.neg_sample_ratio >= 1.0:
+            return batch
+        label = batch['label']
+        B = len(label)
+        pos_mask = label == 1
+        neg_mask = label == 0
+        n_pos = pos_mask.sum().item()
+        n_neg = neg_mask.sum().item()
+        if n_neg == 0 or n_pos == 0:
+            return batch
+        n_keep = max(1, int(n_neg * self.neg_sample_ratio))
+        neg_idx = torch.where(neg_mask)[0]
+        keep_neg = neg_idx[torch.randperm(len(neg_idx))[:n_keep]]
+        keep = torch.zeros(B, dtype=torch.bool)
+        keep[pos_mask] = True
+        keep[keep_neg] = True
+        filtered = {}
+        for k, v in batch.items():
+            if k.startswith('_'):
+                filtered[k] = v
+            elif isinstance(v, torch.Tensor) and v.shape[0] == B:
+                filtered[k] = v[keep]
+            elif isinstance(v, list) and len(v) == B:
+                filtered[k] = [v[i] for i in range(B) if keep[i]]
+            else:
+                filtered[k] = v
+        return filtered
+
     def train(self) -> None:
         """Main training loop: iterates over epochs, performs step-level and
         epoch-level validation, triggers EarlyStopping and the periodic sparse
@@ -296,11 +363,14 @@ class PCVRHyFormerRankingTrainer:
         total_step = 0
 
         for epoch in range(1, self.num_epochs + 1):
+            epoch_start = time.time()
             train_pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader),
                               dynamic_ncols=True)
             loss_sum = 0.0
+            epoch_loss_snapshots = []  # (step, loss) every 1000 steps
 
             for step, batch in train_pbar:
+                batch = self._filter_negatives(batch)
                 loss = self._train_step(batch)
                 total_step += 1
                 loss_sum += loss
@@ -309,6 +379,9 @@ class PCVRHyFormerRankingTrainer:
                     self.writer.add_scalar('Loss/train', loss, total_step)
 
                 train_pbar.set_postfix({"loss": f"{loss:.4f}"})
+
+                if total_step % 1000 == 0:
+                    epoch_loss_snapshots.append((total_step, loss))
 
                 # Step-level validation (only when eval_every_n_steps > 0).
                 if self.eval_every_n_steps > 0 and total_step % self.eval_every_n_steps == 0:
@@ -375,6 +448,15 @@ class PCVRHyFormerRankingTrainer:
                 logging.info(f"Rebuilt Adagrad optimizer after epoch {epoch}, "
                              f"restored optimizer state for {restored} low-cardinality params")
 
+            # ── Epoch summary ──
+            epoch_elapsed = time.time() - epoch_start
+            logging.info(f"Epoch {epoch} time: {epoch_elapsed:.1f}s ({epoch_elapsed/60:.1f}min)")
+            if epoch_loss_snapshots:
+                step_str = " ".join(f"{s:>6}" for s, _ in epoch_loss_snapshots)
+                loss_str = " ".join(f"{v:.4f}" for _, v in epoch_loss_snapshots)
+                logging.info(f"Epoch {epoch} loss@step: {step_str}")
+                logging.info(f"Epoch {epoch} loss@value:{loss_str}")
+
     def _make_model_input(self, device_batch: Dict[str, Any]) -> ModelInput:
         """Construct a ``ModelInput`` NamedTuple from a device_batch dict."""
         seq_domains = device_batch['_seq_domains']
@@ -404,6 +486,10 @@ class PCVRHyFormerRankingTrainer:
         device_batch = self._batch_to_device(batch)
         label = device_batch['label'].float()
 
+        # Label smoothing: y_smooth = y * (1 - α) + α/2
+        if self.label_smoothing > 0:
+            label = label * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
+
         self.dense_optimizer.zero_grad()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.zero_grad()
@@ -417,13 +503,17 @@ class PCVRHyFormerRankingTrainer:
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()
-        # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
-        # with certain tensor shapes in this project.
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
 
         self.dense_optimizer.step()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.step()
+
+        # Step LR schedulers
+        if self.dense_scheduler is not None:
+            self.dense_scheduler.step()
+        if self.sparse_scheduler is not None:
+            self.sparse_scheduler.step()
 
         return loss.item()
 
