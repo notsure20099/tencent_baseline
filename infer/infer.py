@@ -20,8 +20,13 @@ Environment variables:
 import os
 import json
 import logging
+import math
+from datetime import datetime
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+import pyarrow.parquet as pq
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -303,6 +308,163 @@ def _batch_to_model_input(
     )
 
 
+def _explore_test_data(data_dir: str, model_dir: str) -> None:
+    """Print test-set statistics via raw Parquet to diagnose train/test gap."""
+    logging.info("=== Test Data Exploration ===")
+    schema_path = os.path.join(model_dir, 'schema.json')
+    if not os.path.exists(schema_path):
+        schema_path = os.path.join(data_dir, 'schema.json')
+    if not os.path.exists(schema_path):
+        logging.warning("schema.json not found, skip exploration")
+        return
+
+    files = sorted([os.path.join(data_dir, f) for f in os.listdir(data_dir)
+                    if f.endswith('.parquet')])
+    if not files:
+        logging.warning("No parquet files, skip exploration")
+        return
+
+    with open(schema_path) as f:
+        schema = json.load(f)
+    columns = set(pq.ParquetFile(files[0]).schema_arrow.names)
+    seq_cfg = schema.get('seq', {})
+
+    total_rgs = sum(pq.ParquetFile(f).metadata.num_row_groups for f in files)
+    max_rgs = min(200, total_rgs)
+
+    # Accumulators
+    total_rows = 0
+    t_min, t_max = float('inf'), float('-inf')
+    int_stats = defaultdict(lambda: {'nonzero': 0, 'slots': 0, 'sum': 0.0})
+    dense_stats = defaultdict(lambda: {'n': 0, 's1': 0.0, 'zero': 0, 'total': 0})
+    seq_len_data = defaultdict(list)
+
+    def _extract_int(batch, cn, dim):
+        col = batch.column(cn)
+        if dim == 1:
+            arr = col.fill_null(0).to_numpy(zero_copy_only=False).astype(np.int64)
+            arr[arr <= 0] = 0
+            return arr
+        offsets = col.offsets.to_numpy()
+        vals = col.values.to_numpy()
+        B = len(offsets) - 1
+        out = np.zeros((B, dim), dtype=np.int64)
+        for i in range(B):
+            s, e = int(offsets[i]), int(offsets[i + 1])
+            if e <= s: continue
+            ul = min(e - s, dim)
+            out[i, :ul] = vals[s:s + ul]
+        out[out <= 0] = 0
+        return out.ravel()
+
+    def _extract_dense(batch, cn, dim):
+        col = batch.column(cn)
+        offsets = col.offsets.to_numpy()
+        vals = col.values.to_numpy().astype(np.float64)
+        B = len(offsets) - 1
+        out = np.zeros((B, dim), dtype=np.float64)
+        for i in range(B):
+            s, e = int(offsets[i]), int(offsets[i + 1])
+            if e <= s: continue
+            ul = min(e - s, dim)
+            out[i, :ul] = vals[s:s + ul]
+        return out.ravel()
+
+    rg_count = 0
+    for f in files:
+        if rg_count >= max_rgs: break
+        pf = pq.ParquetFile(f)
+        for rg_idx in range(pf.metadata.num_row_groups):
+            if rg_count >= max_rgs: break
+            for batch in pf.iter_batches(batch_size=65536, row_groups=[rg_idx]):
+                B = batch.num_rows
+                total_rows += B
+
+                if 'timestamp' in columns:
+                    ts = batch.column('timestamp').to_numpy().astype(np.int64)
+                    bmin, bmax = int(ts.min()), int(ts.max())
+                    if bmin < t_min: t_min = bmin
+                    if bmax > t_max: t_max = bmax
+
+                for prefix, feats in [
+                    ('user_int_feats', schema['user_int']),
+                    ('item_int_feats', schema['item_int']),
+                ]:
+                    for fid, vs, dim in feats:
+                        cn = f'{prefix}_{fid}'
+                        if cn not in columns: continue
+                        arr = _extract_int(batch, cn, dim)
+                        key = (prefix, fid)
+                        int_stats[key]['slots'] += arr.size
+                        nz = (arr > 0).sum()
+                        int_stats[key]['nonzero'] += int(nz)
+                        if nz > 0:
+                            int_stats[key]['sum'] += float(arr[arr > 0].sum())
+
+                for prefix, feats in [
+                    ('user_dense_feats', schema['user_dense']),
+                    ('item_dense_feats', schema.get('item_dense', [])),
+                ]:
+                    for fid, dim in feats:
+                        cn = f'{prefix}_{fid}'
+                        if cn not in columns: continue
+                        arr = _extract_dense(batch, cn, dim)
+                        key = (prefix, fid)
+                        for v in arr:
+                            dense_stats[key]['n'] += 1
+                            dense_stats[key]['s1'] += v
+                            dense_stats[key]['total'] += 1
+                            if v == 0:
+                                dense_stats[key]['zero'] += 1
+
+                for domain, cfg in seq_cfg.items():
+                    feats = cfg['features']
+                    first_col = f'{cfg["prefix"]}_{feats[0][0]}'
+                    if first_col not in columns: continue
+                    offsets = batch.column(first_col).offsets.to_numpy()
+                    for i in range(len(offsets) - 1):
+                        sl = int(offsets[i + 1]) - int(offsets[i])
+                        seq_len_data[domain].append(sl)
+
+            rg_count += 1
+
+    # ── Output ──
+    logging.info(f"Test rows sampled: {total_rows}")
+
+    if t_min < float('inf'):
+        range_d = (t_max - t_min) / 86400
+        logging.info(f"  Timestamp: {datetime.fromtimestamp(int(t_min))} → "
+                     f"{datetime.fromtimestamp(int(t_max))} ({range_d:.2f} days)")
+
+    # Int features zero-rate
+    logging.info("  Int feature zero-rate (top 10 by delta if known):")
+    for prefix in ['user_int_feats', 'item_int_feats']:
+        for fid in sorted(set(k[1] for k in int_stats if k[0] == prefix))[:10]:
+            st = int_stats.get((prefix, fid))
+            if not st or st['slots'] == 0: continue
+            zr = 1.0 - st['nonzero'] / st['slots']
+            mu = st['sum'] / max(st['nonzero'], 1)
+            logging.info(f"    {prefix}_{fid}: zero={zr:.4f} mean_nz={mu:.1f}")
+
+    # Dense features mean
+    logging.info("  Dense feature means:")
+    for fid in sorted(set(k[1] for k in dense_stats)):
+        st = dense_stats.get(('user_dense_feats', fid))
+        if not st or st['n'] == 0: continue
+        mu = st['s1'] / st['n']
+        zr = st['zero'] / st['total']
+        logging.info(f"    user_dense_{fid}: mean={mu:.4f} zero={zr:.4f}")
+
+    # Sequence lengths
+    logging.info("  Sequence lengths (p50/p90/max):")
+    for domain in sorted(seq_len_data.keys()):
+        sl = np.array(seq_len_data[domain])
+        logging.info(f"    {domain}: p50={np.percentile(sl,50):.0f} "
+                     f"p90={np.percentile(sl,90):.0f} max={int(sl.max())} mean={sl.mean():.1f}")
+
+    logging.info("=== End Test Data Exploration ===")
+
+
 def main() -> None:
     # ---- Read environment variables ----
     model_dir = os.environ.get('MODEL_OUTPUT_PATH')
@@ -312,6 +474,9 @@ def main() -> None:
     os.makedirs(result_dir, exist_ok=True)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # ---- Explore test data before model loading ----
+    _explore_test_data(data_dir, model_dir)
 
     # ---- Schema: prefer the one from model_dir (to exactly match training);
     #      fall back to the one in data_dir if missing. ----
