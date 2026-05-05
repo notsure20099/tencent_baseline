@@ -27,7 +27,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from dataset import FeatureSchema, PCVRParquetDataset, NUM_TIME_BUCKETS
-from model import PCVRHyFormer, ModelInput
+from model import DINSeqPCVR, ModelInput
 
 
 logging.basicConfig(
@@ -164,8 +164,8 @@ def build_model(
     model_cfg: Dict[str, Any],
     ns_groups_json: Optional[str] = None,
     device: str = 'cpu',
-) -> PCVRHyFormer:
-    """Construct a ``PCVRHyFormer`` from the dataset schema, an NS-groups JSON,
+) -> DINSeqPCVR:
+    """Construct a ``DINSeqPCVR`` from the dataset schema, an NS-groups JSON,
     and a resolved ``model_cfg`` dict.
 
     Args:
@@ -220,8 +220,8 @@ def build_model(
     item_int_feature_specs = build_feature_specs(
         dataset.item_int_schema, dataset.item_int_vocab_sizes)
 
-    logging.info(f"Building PCVRHyFormer with cfg: {model_cfg}")
-    model = PCVRHyFormer(
+    logging.info(f"Building DINSeqPCVR with cfg: {model_cfg}")
+    model = DINSeqPCVR(
         user_int_feature_specs=user_int_feature_specs,
         item_int_feature_specs=item_int_feature_specs,
         user_dense_dim=dataset.user_dense_schema.total_dim,

@@ -20,7 +20,7 @@ import torch
 
 from utils import set_seed, EarlyStopping, create_logger
 from dataset import FeatureSchema, get_pcvr_data, NUM_TIME_BUCKETS
-from model import PCVRHyFormer
+from model import DINSeqPCVR
 from trainer import PCVRHyFormerRankingTrainer
 
 
@@ -313,15 +313,10 @@ def main() -> None:
         "item_ns_tokens": args.item_ns_tokens,
     }
 
-    model = PCVRHyFormer(**model_args).to(args.device)
+    model = DINSeqPCVR(**model_args).to(args.device)
 
-    # Log model sizing info.
     num_sequences = len(pcvr_dataset.seq_domains)
-    num_ns = model.num_ns
-    T = args.num_queries * num_sequences + num_ns
-    logging.info(f"PCVRHyFormer model created: num_ns={num_ns}, T={T}, d_model={args.d_model}, rank_mixer_mode={args.rank_mixer_mode}")
-    logging.info(f"User NS groups: {user_ns_groups}")
-    logging.info(f"Item NS groups: {item_ns_groups}")
+    logging.info(f"DINSeqPCVR model created: d_model={args.d_model}, sequences={num_sequences}")
     total_params = sum(p.numel() for p in model.parameters())
     logging.info(f"Total parameters: {total_params:,}")
 
