@@ -3,7 +3,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp2 (Optimal baseline): Label Smoothing 0.05 + Warmup + Dropout 0.05
+#  Exp20 — Exp2 + Item Bridge (item-identity injected into cross-attn Q)
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -15,4 +15,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --label_smoothing 0.05 \
     --warmup_steps 400 \
     --dropout_rate 0.05 \
+    --use_item_bridge \
     "$@"

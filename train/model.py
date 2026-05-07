@@ -246,6 +246,10 @@ class CrossAttention(nn.Module):
 
     Query comes from global tokens (Q tokens), Key/Value comes from sequence
     tokens. Only applies RoPE to KV side (rope_on_q=False).
+
+    When ``use_item_bridge=True``, an item-identity gate is fused into Q so
+    that cross-attention focuses on sequence events relevant to the current
+    item being predicted.
     """
 
     def __init__(
@@ -253,10 +257,12 @@ class CrossAttention(nn.Module):
         d_model: int,
         num_heads: int,
         dropout: float = 0.0,
-        ln_mode: str = 'pre'
+        ln_mode: str = 'pre',
+        use_item_bridge: bool = False,
     ) -> None:
         super().__init__()
         self.ln_mode = ln_mode
+        self.use_item_bridge = use_item_bridge
 
         self.attn = RoPEMultiheadAttention(
             d_model=d_model,
@@ -269,6 +275,12 @@ class CrossAttention(nn.Module):
             self.norm_q = nn.LayerNorm(d_model)
             self.norm_kv = nn.LayerNorm(d_model)
 
+        if use_item_bridge:
+            self.item_gate = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.Sigmoid(),
+            )
+
     def forward(
         self,
         query: torch.Tensor,
@@ -276,6 +288,7 @@ class CrossAttention(nn.Module):
         key_padding_mask: Optional[torch.Tensor] = None,
         rope_cos: Optional[torch.Tensor] = None,
         rope_sin: Optional[torch.Tensor] = None,
+        item_token: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Computes cross-attention between query tokens and sequence tokens.
 
@@ -285,11 +298,18 @@ class CrossAttention(nn.Module):
             key_padding_mask: (B, L), True indicates padding positions.
             rope_cos: (1, L, head_dim), KV-side RoPE cosine values.
             rope_sin: (1, L, head_dim), KV-side RoPE sine values.
+            item_token: (B, Ni, D), optional item-identity tokens for bridging.
 
         Returns:
             Output tensor of shape (B, Nq, D).
         """
         residual = query
+
+        if self.use_item_bridge and item_token is not None:
+            item_pooled = item_token.mean(dim=1)  # (B, D)
+            gate = self.item_gate(item_pooled)     # (B, D)
+            gate = gate.unsqueeze(1)               # (B, 1, D)
+            query = query + gate * item_pooled.unsqueeze(1)
 
         if self.ln_mode == 'pre':
             query = self.norm_q(query)
@@ -853,6 +873,10 @@ class MultiSeqHyFormerBlock(nn.Module):
     Each of the S sequences independently performs Sequence Evolution and
     Query Decoding, then all Q tokens and shared NS tokens are merged for
     joint Query Boosting.
+
+    When ``use_item_bridge=True``, item-identity tokens are fused into the
+    cross-attention Q to focus retrieval on sequence events relevant to the
+    predicted item.
     """
 
     def __init__(
@@ -867,14 +891,14 @@ class MultiSeqHyFormerBlock(nn.Module):
         dropout: float = 0.0,
         top_k: int = 50,
         causal: bool = False,
-        rank_mixer_mode: str = 'full'
+        rank_mixer_mode: str = 'full',
+        use_item_bridge: bool = False,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
         self.num_queries = num_queries
         self.num_ns = num_ns
 
-        # Independent sequence encoder per sequence
         self.seq_encoders = nn.ModuleList([
             create_sequence_encoder(
                 encoder_type=seq_encoder_type,
@@ -888,18 +912,17 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
-        # Independent cross-attention per sequence
         self.cross_attns = nn.ModuleList([
             CrossAttention(
                 d_model=d_model,
                 num_heads=num_heads,
                 dropout=dropout,
-                ln_mode='pre'
+                ln_mode='pre',
+                use_item_bridge=use_item_bridge,
             )
             for _ in range(num_sequences)
         ])
 
-        # RankMixer: input token count = Nq * S + Nns
         n_total = num_queries * num_sequences + num_ns
         self.mixer = RankMixerBlock(
             d_model=d_model,
@@ -917,6 +940,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         seq_padding_masks: list,
         rope_cos_list: Optional[List[torch.Tensor]] = None,
         rope_sin_list: Optional[List[torch.Tensor]] = None,
+        item_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[list, torch.Tensor, list, list]:
         """Processes one multi-sequence HyFormer block step.
 
@@ -927,6 +951,7 @@ class MultiSeqHyFormerBlock(nn.Module):
             seq_padding_masks: List of (B, L_i) masks, length S.
             rope_cos_list: List of (1, L_i, head_dim) tensors, length S.
             rope_sin_list: List of (1, L_i, head_dim) tensors, length S.
+            item_tokens: (B, Ni, D), optional item-identity tokens for bridging.
 
         Returns:
             A tuple (next_q_list, next_ns, next_seq_list, next_masks), where
@@ -960,6 +985,7 @@ class MultiSeqHyFormerBlock(nn.Module):
             decoded_q_i = self.cross_attns[i](
                 q_tokens_list[i], next_seqs[i], next_masks[i],
                 rope_cos=rc, rope_sin=rs,
+                item_token=item_tokens,
             )
             decoded_qs.append(decoded_q_i)
 
@@ -1229,6 +1255,7 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
+        use_item_bridge: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1401,9 +1428,11 @@ class PCVRHyFormer(nn.Module):
                 top_k=seq_top_k,
                 causal=seq_causal,
                 rank_mixer_mode=rank_mixer_mode,
+                use_item_bridge=use_item_bridge,
             )
             for _ in range(num_hyformer_blocks)
         ])
+        self.use_item_bridge = use_item_bridge
 
         # ================== RoPE ==================
         if use_rope:
@@ -1587,7 +1616,8 @@ class PCVRHyFormer(nn.Module):
         ns_tokens: torch.Tensor,
         seq_tokens_list: list,
         seq_masks_list: list,
-        apply_dropout: bool = True
+        apply_dropout: bool = True,
+        item_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Runs the multi-sequence block stack with dropout and output projection."""
         if apply_dropout:
@@ -1601,7 +1631,6 @@ class PCVRHyFormer(nn.Module):
         curr_masks = seq_masks_list
 
         for block in self.blocks:
-            # Precompute RoPE cos/sin for each sequence
             rope_cos_list = None
             rope_sin_list = None
             if self.rotary_emb is not None:
@@ -1621,6 +1650,7 @@ class PCVRHyFormer(nn.Module):
                 seq_padding_masks=curr_masks,
                 rope_cos_list=rope_cos_list,
                 rope_sin_list=rope_sin_list,
+                item_tokens=item_tokens,
             )
 
         # Output: concatenate all sequences' Q tokens then project via MLP
@@ -1636,6 +1666,8 @@ class PCVRHyFormer(nn.Module):
         # 1. NS tokens: grouped projection
         user_ns = self.user_ns_tokenizer(inputs.user_int_feats)   # (B, num_user_groups, D)
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)   # (B, num_item_groups, D)
+
+        item_tokens = item_ns  # item-identity for cross-attn bridging
 
         ns_parts = [user_ns]
         if self.has_user_dense:
@@ -1667,7 +1699,8 @@ class PCVRHyFormer(nn.Module):
         # 4. Dropout + MultiSeqHyFormerBlock stack + output projection
         output = self._run_multi_seq_blocks(
             q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-            apply_dropout=self.training
+            apply_dropout=self.training,
+            item_tokens=item_tokens if self.use_item_bridge else None,
         )
 
         # 5. Classifier
@@ -1679,6 +1712,8 @@ class PCVRHyFormer(nn.Module):
         # Reuses forward logic but without dropout
         user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
+
+        item_tokens = item_ns  # item-identity for cross-attn bridging
 
         ns_parts = [user_ns]
         if self.has_user_dense:
@@ -1707,7 +1742,8 @@ class PCVRHyFormer(nn.Module):
 
         output = self._run_multi_seq_blocks(
             q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-            apply_dropout=False
+            apply_dropout=False,
+            item_tokens=item_tokens if self.use_item_bridge else None,
         )
 
         logits = self.clsfier(output)

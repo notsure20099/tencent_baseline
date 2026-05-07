@@ -123,6 +123,9 @@ def parse_args() -> argparse.Namespace:
                              'dataset.BUCKET_BOUNDARIES; this flag is a pure on/off switch.')
     parser.add_argument('--no_time_buckets', dest='use_time_buckets', action='store_false',
                         help='Disable the time-bucket embedding')
+    parser.add_argument('--use_item_bridge', action='store_true', default=False,
+                        help='Inject item-identity tokens into cross-attention Q '
+                             'to focus retrieval on item-relevant sequence events')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixerBlock mode: '
@@ -311,6 +314,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_item_bridge": args.use_item_bridge,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
