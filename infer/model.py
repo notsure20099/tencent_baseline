@@ -1357,12 +1357,12 @@ class PCVRHyFormer(nn.Module):
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
         T = num_queries * self.num_sequences + self.num_ns
         if rank_mixer_mode == 'full' and d_model % T != 0:
-            valid_T_values = [t for t in range(1, d_model + 1) if d_model % t == 0]
-            raise ValueError(
-                f"d_model={d_model} must be divisible by T=num_queries*num_sequences+num_ns="
-                f"{num_queries}*{self.num_sequences}+{self.num_ns}={T}. "
-                f"Valid T values for d_model={d_model}: {valid_T_values}"
-            )
+            logging.warning(
+                f"d_model={d_model} not divisible by T={T} (num_queries={num_queries}, "
+                f"num_sequences={self.num_sequences}, num_ns={self.num_ns}). "
+                f"Auto-falling back to rank_mixer_mode='ffn_only'.")
+            rank_mixer_mode = 'ffn_only'
+            self.rank_mixer_mode = 'ffn_only'
 
         # ================== Seq Tokens Embedding ==================
         # seq_id_threshold decides which features inside the seq tokenizer are
