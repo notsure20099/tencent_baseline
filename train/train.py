@@ -126,6 +126,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--use_item_bridge', action='store_true', default=False,
                         help='Inject item-identity tokens into cross-attention Q '
                              'to focus retrieval on item-relevant sequence events')
+    parser.add_argument('--dense_token_groups', type=int, default=1,
+                        help='Number of independent projection groups for user_dense features '
+                             '(1 = single token, >1 = multi-token for richer dense representation)')
+    parser.add_argument('--dense_aware_qgen', action='store_true', default=False,
+                        help='Feed dense tokens into the Query Generator so that Q tokens '
+                             'are directly aware of dense feature values')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixerBlock mode: '
@@ -315,6 +321,8 @@ def main() -> None:
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
         "use_item_bridge": args.use_item_bridge,
+        "dense_token_groups": args.dense_token_groups,
+        "dense_aware_qgen": args.dense_aware_qgen,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

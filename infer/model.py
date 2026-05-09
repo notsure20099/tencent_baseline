@@ -447,14 +447,16 @@ class MultiSeqQueryGenerator(nn.Module):
         num_ns: int,
         num_queries: int,
         num_sequences: int,
-        hidden_mult: int = 4
+        hidden_mult: int = 4,
+        num_dense_tokens: int = 0,
     ) -> None:
         super().__init__()
         self.num_queries = num_queries
         self.num_sequences = num_sequences
         self.d_model = d_model
+        self.num_dense_tokens = num_dense_tokens
 
-        global_info_dim = (num_ns + 1) * d_model
+        global_info_dim = (num_ns + num_dense_tokens + 1) * d_model
 
         # LayerNorm on global_info to prevent gradient explosion from large-dim concat
         self.global_info_norm = nn.LayerNorm(global_info_dim)
@@ -477,7 +479,8 @@ class MultiSeqQueryGenerator(nn.Module):
         self,
         ns_tokens: torch.Tensor,
         seq_tokens_list: list,
-        seq_padding_masks: list
+        seq_padding_masks: list,
+        dense_tokens: Optional[torch.Tensor] = None,
     ) -> list:
         """Generates query tokens for each sequence.
 
@@ -486,12 +489,16 @@ class MultiSeqQueryGenerator(nn.Module):
             seq_tokens_list: List of (B, L_i, D) tensors, length S.
             seq_padding_masks: List of (B, L_i) masks, length S. True
                 indicates padding.
+            dense_tokens: (B, K, D), optional dense feature tokens.
 
         Returns:
             List of (B, Nq, D) query token tensors, length S.
         """
         B = ns_tokens.shape[0]
         ns_flat = ns_tokens.view(B, -1)  # (B, M*D)
+        if dense_tokens is not None:
+            dense_flat = dense_tokens.view(B, -1)  # (B, K*D)
+            ns_flat = torch.cat([ns_flat, dense_flat], dim=-1)
 
         q_tokens_list = []
         for i in range(self.num_sequences):
@@ -1256,6 +1263,8 @@ class PCVRHyFormer(nn.Module):
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
         use_item_bridge: bool = False,
+        dense_token_groups: int = 1,
+        dense_aware_qgen: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1324,11 +1333,14 @@ class PCVRHyFormer(nn.Module):
 
         # User dense feature projection (if available)
         self.has_user_dense = user_dense_dim > 0
+        self.dense_token_groups = dense_token_groups if self.has_user_dense else 0
+        self.dense_aware_qgen = dense_aware_qgen and self.has_user_dense
         if self.has_user_dense:
-            self.user_dense_proj = nn.Sequential(
-                nn.Linear(user_dense_dim, d_model),
-                nn.LayerNorm(d_model),
-            )
+            self._dense_group_dims_list = self._dense_group_dims(user_dense_dim, dense_token_groups)
+            self.user_dense_proj = nn.ModuleList([
+                nn.Sequential(nn.Linear(d, d_model), nn.LayerNorm(d_model))
+                for d in self._dense_group_dims_list
+            ])
 
         # Item dense feature projection (if available)
         self.has_item_dense = item_dense_dim > 0
@@ -1339,7 +1351,7 @@ class PCVRHyFormer(nn.Module):
             )
 
         # Total NS token count
-        self.num_ns = (num_user_ns + (1 if self.has_user_dense else 0)
+        self.num_ns = (num_user_ns + (self.dense_token_groups if self.has_user_dense else 0)
                        + num_item_ns + (1 if self.has_item_dense else 0))
 
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
@@ -1412,6 +1424,7 @@ class PCVRHyFormer(nn.Module):
             num_queries=num_queries,
             num_sequences=self.num_sequences,
             hidden_mult=hidden_mult,
+            num_dense_tokens=self.dense_token_groups if self.dense_aware_qgen else 0,
         )
 
         # MultiSeqHyFormerBlock stack
@@ -1479,6 +1492,24 @@ class PCVRHyFormer(nn.Module):
                 t = len(tokenizer._emb_index)
                 if f > 0:
                     logging.info(f"emb_skip_threshold={emb_skip_threshold}: {name} skipped {f}/{t} features")
+
+    def _dense_group_dims(self, total_dim: int, groups: int):
+        base = total_dim // groups
+        rem = total_dim % groups
+        dims = []
+        for i in range(groups):
+            dims.append(base + (1 if i < rem else 0))
+        return dims
+
+    def _project_dense(self, dense_feats: torch.Tensor) -> torch.Tensor:
+        tokens = []
+        start = 0
+        for g, proj in enumerate(self.user_dense_proj):
+            dim = self._dense_group_dims_list[g]
+            chunk = dense_feats[:, start:start + dim]
+            tokens.append(F.silu(proj(chunk)))
+            start += dim
+        return torch.stack(tokens, dim=1)  # (B, K, D)
 
     def _init_params(self) -> None:
         """Applies Xavier initialization to all embedding weights."""
@@ -1669,10 +1700,11 @@ class PCVRHyFormer(nn.Module):
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
 
+        dense_tokens = None
         ns_parts = [user_ns]
         if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)  # (B, 1, D)
-            ns_parts.append(user_dense_tok)
+            dense_tokens = self._project_dense(inputs.user_dense_feats)  # (B, K, D)
+            ns_parts.append(dense_tokens)
         ns_parts.append(item_ns)
         if self.has_item_dense:
             item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)  # (B, 1, D)
@@ -1694,7 +1726,10 @@ class PCVRHyFormer(nn.Module):
             seq_masks_list.append(mask)
 
         # 3. Generate independent Q tokens per sequence via MultiSeqQueryGenerator
-        q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
+        q_tokens_list = self.query_generator(
+            ns_tokens, seq_tokens_list, seq_masks_list,
+            dense_tokens=dense_tokens if self.dense_aware_qgen else None,
+        )
 
         # 4. Dropout + MultiSeqHyFormerBlock stack + output projection
         output = self._run_multi_seq_blocks(
@@ -1715,10 +1750,11 @@ class PCVRHyFormer(nn.Module):
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
 
+        dense_tokens = None
         ns_parts = [user_ns]
         if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)
-            ns_parts.append(user_dense_tok)
+            dense_tokens = self._project_dense(inputs.user_dense_feats)  # (B, K, D)
+            ns_parts.append(dense_tokens)
         ns_parts.append(item_ns)
         if self.has_item_dense:
             item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
@@ -1738,7 +1774,10 @@ class PCVRHyFormer(nn.Module):
             mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
             seq_masks_list.append(mask)
 
-        q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
+        q_tokens_list = self.query_generator(
+            ns_tokens, seq_tokens_list, seq_masks_list,
+            dense_tokens=dense_tokens if self.dense_aware_qgen else None,
+        )
 
         output = self._run_multi_seq_blocks(
             q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
