@@ -3,7 +3,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp20 — Exp2 + Item Bridge (item-identity injected into cross-attn Q)
+#  Exp27: Dense-MG+QG — 8-group dense projection + dense-aware Q generation
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -16,4 +16,6 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --warmup_steps 400 \
     --dropout_rate 0.05 \
     --use_item_bridge \
+    --dense_token_groups 8 \
+    --dense_aware_qgen \
     "$@"
