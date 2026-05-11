@@ -176,9 +176,9 @@ class RoPEMultiheadAttention(nn.Module):
                 RoPE for cross-attention with gathered positions.
             q_rope_sin: Same shape as q_rope_cos.
             need_weights: Compatibility parameter, not used.
-            time_bias: (B, Lk), additive bias per key position for temporal
-                modulation. When provided, mask is built as additive float
-                instead of bool.
+            time_bias: (B, num_heads, Lk), per-head additive bias for
+                temporal modulation. When provided, mask is built as
+                additive float instead of bool.
 
         Returns:
             Tuple of (output, None).
@@ -210,7 +210,7 @@ class RoPEMultiheadAttention(nn.Module):
         # 4. Build attention mask
         sdpa_attn_mask = None
         if time_bias is not None:
-            sdpa_attn_mask = time_bias.unsqueeze(1).unsqueeze(2).expand(
+            sdpa_attn_mask = time_bias.unsqueeze(2).expand(
                 B, self.num_heads, Lq, Lk).to(query.dtype)
             if key_padding_mask is not None:
                 sdpa_attn_mask = sdpa_attn_mask.masked_fill(
@@ -293,7 +293,7 @@ class CrossAttention(nn.Module):
             )
 
         if use_time_bias:
-            self.temporal_bias = nn.Embedding(num_time_buckets, 1)
+            self.temporal_bias = nn.Embedding(num_time_buckets, num_heads)
             nn.init.uniform_(self.temporal_bias.weight, -0.5, 0.5)
 
     def forward(
@@ -336,7 +336,8 @@ class CrossAttention(nn.Module):
 
         time_bias = None
         if self.use_time_bias and key_time_buckets is not None:
-            time_bias = self.temporal_bias(key_time_buckets).squeeze(-1)  # (B, L)
+            time_bias = self.temporal_bias(key_time_buckets)  # (B, L, num_heads)
+            time_bias = time_bias.transpose(1, 2)  # (B, num_heads, L)
 
         out, _ = self.attn(
             query=query,

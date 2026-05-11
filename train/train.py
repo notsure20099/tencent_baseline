@@ -331,6 +331,7 @@ def main() -> None:
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
+    model = torch.compile(model)
 
     # Log model sizing info.
     num_sequences = len(pcvr_dataset.seq_domains)

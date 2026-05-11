@@ -382,7 +382,6 @@ class PCVRHyFormerRankingTrainer:
                     logging.info(f"Evaluating at step {total_step}")
                     val_auc, val_logloss = self.evaluate(epoch=epoch)
                     self.model.train()
-                    torch.cuda.empty_cache()
 
                     logging.info(f"Step {total_step} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
@@ -400,7 +399,6 @@ class PCVRHyFormerRankingTrainer:
 
             val_auc, val_logloss = self.evaluate(epoch=epoch)
             self.model.train()
-            torch.cuda.empty_cache()
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
