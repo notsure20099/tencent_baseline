@@ -229,7 +229,8 @@ class EarlyStopping:
         if self.verbose:
             logging.info('Validation score increased. Saving model ...')
         os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
-        torch.save(model.state_dict(), self.checkpoint_path)
+        raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
+        torch.save(raw_model.state_dict(), self.checkpoint_path)
         self.best_saved_score = score
 
 

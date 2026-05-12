@@ -224,7 +224,8 @@ class PCVRHyFormerRankingTrainer:
         ckpt_dir = os.path.join(self.save_dir, dir_name)
         os.makedirs(ckpt_dir, exist_ok=True)
         if not skip_model_file:
-            torch.save(self.model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
+            raw_model = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+            torch.save(raw_model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
         self._write_sidecar_files(ckpt_dir)
         logging.info(f"Saved checkpoint to {ckpt_dir}/model.pt")
         return ckpt_dir

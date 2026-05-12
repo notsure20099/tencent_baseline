@@ -36,6 +36,42 @@ logging.basicConfig(
 )
 
 
+def _log_gpu_memory(tag: str = '') -> None:
+    """Log CUDA memory usage and per-process GPU utilization.
+
+    Emits ``nvidia-smi`` output (when available) and PyTorch's allocator
+    summary so that OOM diagnostics are self-contained in the log.
+    """
+    if not torch.cuda.is_available():
+        logging.info(f"[GPU:{tag}] CUDA not available")
+        return
+
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    allocated = torch.cuda.memory_allocated()
+    reserved = torch.cuda.memory_reserved()
+    used_pct = 100.0 * (total_bytes - free_bytes) / total_bytes
+
+    logging.info(
+        f"[GPU:{tag}] total={total_bytes / 1024**3:.2f} GiB  "
+        f"free={free_bytes / 1024**3:.2f} GiB  "
+        f"used={used_pct:.1f}%  "
+        f"allocated={allocated / 1024**3:.2f} GiB  "
+        f"reserved={reserved / 1024**3:.2f} GiB"
+    )
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-compute-apps=pid,used_memory',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            logging.info(f"[GPU:{tag}] nvidia-smi processes:\n{result.stdout.strip()}")
+    except Exception:
+        pass
+
+
 # Fallback values used only when ``train_config.json`` is missing from the
 # ckpt directory.
 #
@@ -248,6 +284,8 @@ def load_model_state_strict(
     with a diagnostic message.
     """
     state_dict = torch.load(ckpt_path, map_location=device)
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        state_dict = {k.removeprefix('_orig_mod.'): v for k, v in state_dict.items()}
     try:
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as e:
@@ -333,7 +371,14 @@ def main() -> None:
     logging.info(f"seq_max_lens: {seq_max_lens}")
 
     # ---- Data loading: reuse batch_size / num_workers from training config ----
-    batch_size = int(train_config.get('batch_size', _FALLBACK_BATCH_SIZE))
+    # Allow overriding batch_size via EVAL_BATCH_SIZE env var (useful when
+    # GPU memory is tight, e.g. shared GPU with other processes).
+    eval_batch_size = os.environ.get('EVAL_BATCH_SIZE')
+    if eval_batch_size is not None:
+        batch_size = int(eval_batch_size)
+        logging.info(f"Using EVAL_BATCH_SIZE={batch_size} (overriding training config)")
+    else:
+        batch_size = int(train_config.get('batch_size', _FALLBACK_BATCH_SIZE))
     num_workers = int(train_config.get('num_workers', _FALLBACK_NUM_WORKERS))
 
     test_dataset = PCVRParquetDataset(
@@ -362,12 +407,14 @@ def main() -> None:
         if os.path.exists(local_candidate):
             ns_groups_json = local_candidate
 
+    _log_gpu_memory('before_build')
     model = build_model(
         test_dataset,
         model_cfg=model_cfg,
         ns_groups_json=ns_groups_json,
         device=device,
     )
+    _log_gpu_memory('after_build')
 
     # ---- Strictly load weights ----
     ckpt_path = get_ckpt_path()
@@ -385,6 +432,12 @@ def main() -> None:
     model.eval()
     logging.info("Model loaded successfully")
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        logging.info("Cleared CUDA cache before inference")
+
+    _log_gpu_memory('before_inference')
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=None,
@@ -397,19 +450,23 @@ def main() -> None:
     all_user_ids = []
     logging.info("Starting inference...")
 
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(test_loader):
-            model_input = _batch_to_model_input(batch, device)
-            user_ids = batch.get('user_id', [])
+    try:
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(test_loader):
+                model_input = _batch_to_model_input(batch, device)
+                user_ids = batch.get('user_id', [])
 
-            logits, _ = model.predict(model_input)
-            logits = logits.squeeze(-1)
-            probs = torch.sigmoid(logits).cpu().numpy()
-            all_probs.extend(probs.tolist())
-            all_user_ids.extend(user_ids)
+                logits, _ = model.predict(model_input)
+                logits = logits.squeeze(-1)
+                probs = torch.sigmoid(logits).cpu().numpy()
+                all_probs.extend(probs.tolist())
+                all_user_ids.extend(user_ids)
 
-            if (batch_idx + 1) % 100 == 0:
-                logging.info(f"  Processed {(batch_idx + 1) * batch_size} samples")
+                if (batch_idx + 1) % 100 == 0:
+                    logging.info(f"  Processed {(batch_idx + 1) * batch_size} samples")
+    except RuntimeError as e:
+        _log_gpu_memory(f'OOM_at_batch_{batch_idx}')
+        raise e
 
     logging.info(f"Inference complete: {len(all_probs)} predictions")
 
