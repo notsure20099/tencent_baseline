@@ -293,8 +293,13 @@ class CrossAttention(nn.Module):
             )
 
         if use_time_bias:
-            self.temporal_bias = nn.Embedding(num_time_buckets, num_heads)
-            nn.init.uniform_(self.temporal_bias.weight, -0.5, 0.5)
+            self.time_embed = nn.Embedding(num_time_buckets, d_model)
+            nn.init.uniform_(self.time_embed.weight, -0.1, 0.1)
+            self.time_mlp = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.SiLU(),
+                nn.Linear(d_model, num_heads),
+            )
 
     def forward(
         self,
@@ -336,7 +341,8 @@ class CrossAttention(nn.Module):
 
         time_bias = None
         if self.use_time_bias and key_time_buckets is not None:
-            time_bias = self.temporal_bias(key_time_buckets)  # (B, L, num_heads)
+            time_emb = self.time_embed(key_time_buckets)  # (B, L, d_model)
+            time_bias = self.time_mlp(time_emb)  # (B, L, num_heads)
             time_bias = time_bias.transpose(1, 2)  # (B, num_heads, L)
 
         out, _ = self.attn(

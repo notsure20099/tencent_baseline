@@ -236,6 +236,11 @@ def main() -> None:
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     Path(args.tf_events_dir).mkdir(parents=True, exist_ok=True)
 
+    # Training speed optimizations.
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision('high')
+
     # Initialize logger and RNG.
     set_seed(args.seed)
     create_logger(os.path.join(args.log_dir, 'train.log'))
@@ -331,7 +336,7 @@ def main() -> None:
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
-    model = torch.compile(model)
+    model = torch.compile(model, mode="reduce-overhead")
 
     # Log model sizing info.
     num_sequences = len(pcvr_dataset.seq_domains)
