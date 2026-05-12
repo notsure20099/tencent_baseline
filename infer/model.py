@@ -294,7 +294,7 @@ class CrossAttention(nn.Module):
 
         if use_time_bias:
             self.time_embed = nn.Embedding(num_time_buckets, d_model)
-            nn.init.uniform_(self.time_embed.weight, -0.1, 0.1)
+            nn.init.uniform_(self.time_embed.weight, -0.5, 0.5)  # 扩大初始化范围，融合 exp29 的优点
             self.time_mlp = nn.Sequential(
                 nn.Linear(d_model, d_model),
                 nn.SiLU(),
