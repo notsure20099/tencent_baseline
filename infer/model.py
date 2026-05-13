@@ -258,6 +258,10 @@ class CrossAttention(nn.Module):
     When ``use_item_bridge=True``, an item-identity gate is fused into Q so
     that cross-attention focuses on sequence events relevant to the current
     item being predicted.
+
+    When ``use_time_bias=True``, a learnable per-time-bucket scalar bias is
+    added to attention scores so that more recent sequence events naturally
+    receive higher attention.
     """
 
     def __init__(
@@ -527,19 +531,41 @@ class MultiSeqQueryGenerator(nn.Module):
 
         q_tokens_list = []
         for i in range(self.num_sequences):
-            # MeanPool(Seq_i)
             valid_mask = ~seq_padding_masks[i]  # True = valid
-            valid_mask_expanded = valid_mask.unsqueeze(-1).float()  # (B, L_i, 1)
-            seq_sum = (seq_tokens_list[i] * valid_mask_expanded).sum(dim=1)  # (B, D)
-            seq_count = valid_mask_expanded.sum(dim=1).clamp(min=1)  # (B, 1)
-            seq_pooled = seq_sum / seq_count  # (B, D)
+            valid_len = valid_mask.sum(dim=1).clamp(min=1)  # (B,)
 
-            # GlobalInfo_i = Concat(NS_flat, seq_pooled_i)
-            global_info = torch.cat([ns_flat, seq_pooled], dim=-1)  # (B, (M+1)*D)
-            global_info = self.global_info_norm(global_info)
+            # Q0: full-sequence MeanPool (original behaviour)
+            valid_expanded = valid_mask.unsqueeze(-1).float()
+            seq_sum = (seq_tokens_list[i] * valid_expanded).sum(dim=1)
+            seq_pooled_full = seq_sum / valid_len.unsqueeze(1)
 
-            # Generate N query tokens
-            queries = [ffn(global_info) for ffn in self.query_ffns_per_seq[i]]
+            global_info_full = torch.cat([ns_flat, seq_pooled_full], dim=-1)
+            global_info_full = self.global_info_norm(global_info_full)
+
+            queries = [self.query_ffns_per_seq[i][0](global_info_full)]
+
+            # Q1...Q_{Nq-1}: tail-window MeanPool (if num_queries >= 2)
+            for q in range(1, self.num_queries):
+                # Each extra Q sees the last tail_ratio of valid tokens
+                tail_ratio = 1.0 / (q + 1)  # Q1→50%, Q2→33%, etc.
+                tail_len = (valid_len.float() * tail_ratio).clamp(min=1).long()
+                start_pos = valid_len - tail_len
+                start_pos = start_pos.clamp(min=0)
+
+                # Build mask: positions >= start_pos and < valid_len AND not padding
+                pos_idx = torch.arange(seq_tokens_list[i].shape[1],
+                                       device=seq_tokens_list[i].device).unsqueeze(0)
+                tail_mask = (pos_idx >= start_pos.unsqueeze(1)) & valid_mask
+
+                tail_expanded = tail_mask.unsqueeze(-1).float()
+                tail_sum = (seq_tokens_list[i] * tail_expanded).sum(dim=1)
+                tail_count = tail_mask.sum(dim=1).clamp(min=1).unsqueeze(1)
+                seq_pooled_tail = tail_sum / tail_count
+
+                global_info_tail = torch.cat([ns_flat, seq_pooled_tail], dim=-1)
+                global_info_tail = self.global_info_norm(global_info_tail)
+                queries.append(self.query_ffns_per_seq[i][q](global_info_tail))
+
             q_tokens = torch.stack(queries, dim=1)  # (B, Nq, D)
             q_tokens_list.append(q_tokens)
 
@@ -933,7 +959,6 @@ class MultiSeqHyFormerBlock(nn.Module):
         self.num_queries = num_queries
         self.num_ns = num_ns
 
-        # Independent sequence encoder per sequence
         self.seq_encoders = nn.ModuleList([
             create_sequence_encoder(
                 encoder_type=seq_encoder_type,
@@ -947,7 +972,6 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
-        # Independent cross-attention per sequence
         self.cross_attns = nn.ModuleList([
             CrossAttention(
                 d_model=d_model,
@@ -961,7 +985,6 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
-        # RankMixer: input token count = Nq * S + Nns
         n_total = num_queries * num_sequences + num_ns
         self.mixer = RankMixerBlock(
             d_model=d_model,
@@ -970,6 +993,9 @@ class MultiSeqHyFormerBlock(nn.Module):
             dropout=dropout,
             mode=rank_mixer_mode
         )
+
+        # Per-domain learnable gate → model learns which domain contributes how much
+        self.domain_gates = nn.Parameter(torch.ones(num_sequences))
 
     def forward(
         self,
@@ -1034,7 +1060,8 @@ class MultiSeqHyFormerBlock(nn.Module):
             decoded_qs.append(decoded_q_i)
 
         # 3. Token Fusion: concatenate all decoded_q + ns_tokens
-        combined = torch.cat(decoded_qs + [ns_tokens], dim=1)  # (B, Nq*S + Nns, D)
+        gated_qs = [self.domain_gates[i] * decoded_qs[i] for i in range(S)]
+        combined = torch.cat(gated_qs + [ns_tokens], dim=1)  # (B, Nq*S + Nns, D)
 
         # 4. Query Boosting
         boosted = self.mixer(combined)  # (B, Nq*S + Nns, D)
