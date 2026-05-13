@@ -338,10 +338,12 @@ def _run_q4_diagnose(model, dataset, device):
     test_loader = DataLoader(dataset, batch_size=None, num_workers=min(4, os.cpu_count() or 1),
                              prefetch_factor=2, pin_memory=torch.cuda.is_available())
 
-    def _collect_auc(loader, shuffle_mode="none"):
+    def _collect_auc(loader, shuffle_mode="none", max_batches=0):
         probs_all, labels_all = [], []
         with torch.no_grad():
-            for batch in loader:
+            for bi, batch in enumerate(loader):
+                if max_batches and bi >= max_batches:
+                    break
                 # move to device
                 db = {}
                 for k, v in batch.items():
@@ -384,12 +386,16 @@ def _run_q4_diagnose(model, dataset, device):
 
         return _manual_auc(labels_all, probs_all)
 
+    # Sampling: read Q4_SAMPLE_BATCHES env var (default 300 batches)
+    n_max = int(os.environ.get('Q4_SAMPLE_BATCHES', '300'))
+    logging.info(f"Q4 sampling: max {n_max} batches per pass")
+
     logging.info("Computing baseline AUC...")
-    auc_base = _collect_auc(test_loader, "none")
+    auc_base = _collect_auc(test_loader, "none", max_batches=n_max)
     logging.info("Computing shuffle-time AUC...")
-    auc_time = _collect_auc(test_loader, "time")
+    auc_time = _collect_auc(test_loader, "time", max_batches=n_max)
     logging.info("Computing shuffle-fid AUC...")
-    auc_fid = _collect_auc(test_loader, "fid")
+    auc_fid = _collect_auc(test_loader, "fid", max_batches=n_max)
 
     time_drop = auc_base - auc_time
     fid_drop = auc_base - auc_fid
@@ -544,7 +550,28 @@ def main() -> None:
 
     # ── Q4 diagnostic: Content vs Time awareness ──
     if os.environ.get('Q4_DIAGNOSE', '').lower() in ('true', '1', 'yes'):
-        _run_q4_diagnose(model, test_dataset, device)
+        # Q4 needs labels → use training data path (TRAIN_DATA_PATH env var
+        # or fallback: strip the task-id suffix from EVAL_DATA_PATH)
+        q4_data_dir = os.environ.get('TRAIN_DATA_PATH', '')
+        if not q4_data_dir:
+            # fallback: try replacing the task dir suffix in EVAL_DATA_PATH
+            # e.g. .../84887/test_data → .../train_data
+            q4_data_dir = data_dir.replace('/test/', '/train/').replace('/eval/', '/train/')
+        if not q4_data_dir or not os.path.isdir(q4_data_dir):
+            q4_data_dir = data_dir
+            logging.warning("Q4: TRAIN_DATA_PATH not set, using EVAL_DATA_PATH (labels may be all-zero!)")
+
+        q4_dataset = PCVRParquetDataset(
+            parquet_path=q4_data_dir,
+            schema_path=schema_path,
+            batch_size=batch_size,
+            seq_max_lens=seq_max_lens,
+            shuffle=True,
+            buffer_batches=20,
+            is_training=True,  # ← read real labels
+        )
+        logging.info(f"Q4: using data from {q4_data_dir} ({q4_dataset.num_rows} rows, is_training=True)")
+        _run_q4_diagnose(model, q4_dataset, device)
         return
 
     test_loader = DataLoader(
