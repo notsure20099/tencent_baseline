@@ -69,6 +69,7 @@ def main():
         train_ratio=1.0,
         num_workers=0,
         buffer_batches=20,
+        seq_max_lens={"seq_a": 256, "seq_b": 256, "seq_c": 512, "seq_d": 512},
     )
     domains = dataset.seq_domains
     sideinfo_fids = dataset.sideinfo_fids
