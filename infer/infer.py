@@ -310,6 +310,110 @@ def get_ckpt_path() -> Optional[str]:
     return None
 
 
+def _manual_auc(labels: List[int], probs: List[float]) -> float:
+    """Manual AUC computation — no sklearn dependency."""
+    pairs = sorted(zip(probs, labels), key=lambda x: x[0])
+    pos_count = sum(labels)
+    neg_count = len(labels) - pos_count
+    if pos_count == 0 or neg_count == 0:
+        return float("nan")
+    auc = 0.0
+    neg_below = 0
+    for prob, lbl in pairs:
+        if lbl == 1:
+            auc += neg_below
+        else:
+            neg_below += 1
+    return auc / (pos_count * neg_count)
+
+
+def _run_q4_diagnose(model, dataset, device):
+    """Q4: Content vs Time awareness — shuffle ablation."""
+    import numpy as np
+    logging.info("=" * 60)
+    logging.info("Q4: CONTENT vs TIME AWARENESS (shuffle ablation)")
+    logging.info("=" * 60)
+
+    # need labels — verify dataset has them
+    test_loader = DataLoader(dataset, batch_size=None, num_workers=min(4, os.cpu_count() or 1),
+                             prefetch_factor=2, pin_memory=torch.cuda.is_available())
+
+    def _collect_auc(loader, shuffle_mode="none"):
+        probs_all, labels_all = [], []
+        with torch.no_grad():
+            for batch in loader:
+                # move to device
+                db = {}
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        db[k] = v.to(device, non_blocking=True)
+                    else:
+                        db[k] = v
+
+                label = db.get("label")
+                if label is None:
+                    return float("nan")
+                if hasattr(label, "numpy"):
+                    label = label.cpu().numpy()
+                elif isinstance(label, list):
+                    label = np.array(label)
+                else:
+                    label = np.zeros(len(db[list(db.keys())[0]]))
+
+                # apply shuffle
+                if shuffle_mode == "time":
+                    for d in db.get("_seq_domains", []):
+                        tb_key = f"{d}_time_bucket"
+                        if tb_key in db:
+                            tb = db[tb_key]
+                            idx = torch.randperm(tb.shape[0], device=device)
+                            db[tb_key] = tb[idx]
+                elif shuffle_mode == "fid":
+                    for d in db.get("_seq_domains", []):
+                        seq = db[d]
+                        B, nf, L = seq.shape
+                        for bb in range(B):
+                            perm = torch.randperm(L, device=device)
+                            db[d][bb] = seq[bb, :, perm]
+
+                mi = _batch_to_model_input(db, device)
+                logits, _ = model.predict(mi)
+                p = torch.sigmoid(logits.squeeze(-1)).cpu().numpy()
+                probs_all.extend(p.tolist())
+                labels_all.extend(label.tolist())
+
+        return _manual_auc(labels_all, probs_all)
+
+    logging.info("Computing baseline AUC...")
+    auc_base = _collect_auc(test_loader, "none")
+    logging.info("Computing shuffle-time AUC...")
+    auc_time = _collect_auc(test_loader, "time")
+    logging.info("Computing shuffle-fid AUC...")
+    auc_fid = _collect_auc(test_loader, "fid")
+
+    time_drop = auc_base - auc_time
+    fid_drop = auc_base - auc_fid
+
+    logging.info("=" * 60)
+    logging.info("Q4 RESULTS")
+    logging.info(f"  baseline           AUC = {auc_base:.6f}")
+    logging.info(f"  shuffle time       AUC = {auc_time:.6f}  (drop = {time_drop:+.6f})")
+    logging.info(f"  shuffle fid order  AUC = {auc_fid:.6f}  (drop = {fid_drop:+.6f})")
+    logging.info("  --- interpretation ---")
+    if time_drop > 0.001 and fid_drop < 0.0003:
+        logging.info("  model relies HEAVILY on time, barely on content")
+        logging.info("  -> content-interaction optimisations may have room")
+    elif fid_drop > 0.001 and time_drop < 0.0003:
+        logging.info("  model relies on content, time is weak")
+        logging.info("  -> time bias direction fully exploited; content mining is path")
+    elif time_drop > 0.001 and fid_drop > 0.001:
+        logging.info("  model uses both time and content — balanced")
+        logging.info("  -> either direction valid, pick cheaper one")
+    else:
+        logging.info("  both drops small — model may rely on non-seq features")
+    logging.info("=" * 60)
+
+
 def _batch_to_model_input(
     batch: Dict[str, Any],
     device: str,
@@ -437,6 +541,11 @@ def main() -> None:
         logging.info("Cleared CUDA cache before inference")
 
     _log_gpu_memory('before_inference')
+
+    # ── Q4 diagnostic: Content vs Time awareness ──
+    if os.environ.get('Q4_DIAGNOSE', '').lower() in ('true', '1', 'yes'):
+        _run_q4_diagnose(model, test_dataset, device)
+        return
 
     test_loader = DataLoader(
         test_dataset,
