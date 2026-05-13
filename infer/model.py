@@ -372,9 +372,7 @@ class CrossAttention(nn.Module):
         if self.ln_mode == 'post':
             out = self.norm_q(out)
 
-        if return_temporal_stats:
-            return out, temporal_stats
-        return out
+        return out, temporal_stats
 
 
 class RankMixerBlock(nn.Module):
