@@ -305,6 +305,7 @@ class CrossAttention(nn.Module):
         rope_sin: Optional[torch.Tensor] = None,
         item_token: Optional[torch.Tensor] = None,
         key_time_buckets: Optional[torch.Tensor] = None,
+        return_temporal_stats: bool = False,
     ) -> torch.Tensor:
         """Computes cross-attention between query tokens and sequence tokens.
 
@@ -318,9 +319,13 @@ class CrossAttention(nn.Module):
             key_time_buckets: (B, L), time bucket ids for each sequence
                 position. Used to look up per-position temporal bias when
                 ``use_time_bias=True``.
+            return_temporal_stats: if True, returns a tuple (output, stats)
+                where stats is a (B, 4) tensor of [mean, max, std, peak_bucket]
+                derived from the temporal_bias distribution.
 
         Returns:
-            Output tensor of shape (B, Nq, D).
+            Output tensor of shape (B, Nq, D), or a tuple (output, temporal_stats)
+            when ``return_temporal_stats`` is True.
         """
         residual = query
 
@@ -335,9 +340,22 @@ class CrossAttention(nn.Module):
             key_value = self.norm_kv(key_value)
 
         time_bias = None
+        temporal_stats = None
         if self.use_time_bias and key_time_buckets is not None:
             time_bias = self.temporal_bias(key_time_buckets)  # (B, L, num_heads)
             time_bias = time_bias.transpose(1, 2)  # (B, num_heads, L)
+
+            if return_temporal_stats:
+                tm = time_bias  # (B, num_heads, L)
+                valid_mask = (key_time_buckets != 0).float()  # (B, L)
+                valid_count = valid_mask.sum(dim=1).clamp(min=1)  # (B,)
+                t_masked = tm * valid_mask.unsqueeze(1)  # (B, num_heads, L)
+                t_mean = t_masked.sum(dim=(1, 2)) / (valid_count * tm.shape[1])  # (B,)
+                t_max = (t_masked.amax(dim=2) * valid_mask).amax(dim=1)  # (B,)
+                t_flat = t_masked.reshape(t_masked.shape[0], -1)  # (B, num_heads*L)
+                t_std = t_flat.std(dim=1)  # (B,)
+                peak_pos = tm.mean(dim=1).argmax(dim=1).float() / tm.shape[2]  # (B,) in [0,1]
+                temporal_stats = torch.stack([t_mean, t_max, t_std, peak_pos], dim=-1)  # (B, 4)
 
         out, _ = self.attn(
             query=query,
@@ -354,6 +372,8 @@ class CrossAttention(nn.Module):
         if self.ln_mode == 'post':
             out = self.norm_q(out)
 
+        if return_temporal_stats:
+            return out, temporal_stats
         return out
 
 
@@ -961,6 +981,10 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
+        self.seq_gates = nn.ModuleList([
+            nn.Linear(4, d_model) for _ in range(num_sequences)
+        ]) if use_time_bias else None
+
         # RankMixer: input token count = Nq * S + Nns
         n_total = num_queries * num_sequences + num_ns
         self.mixer = RankMixerBlock(
@@ -1030,7 +1054,12 @@ class MultiSeqHyFormerBlock(nn.Module):
                 rope_cos=rc, rope_sin=rs,
                 item_token=item_tokens,
                 key_time_buckets=tb,
+                return_temporal_stats=True,
             )
+            decoded_q_i, time_stats_i = decoded_q_i
+            if self.seq_gates is not None and time_stats_i is not None:
+                gate_i = torch.sigmoid(self.seq_gates[i](time_stats_i))  # (B, d_model)
+                decoded_q_i = decoded_q_i * gate_i.unsqueeze(1)  # (B, Nq, D) * (B, 1, D)
             decoded_qs.append(decoded_q_i)
 
         # 3. Token Fusion: concatenate all decoded_q + ns_tokens
