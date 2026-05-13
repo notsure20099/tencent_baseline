@@ -33,7 +33,7 @@ def main():
         valid_ratio=0.1,
         train_ratio=1.0,
         num_workers=0,
-        buffer_batches=0,
+        buffer_batches=20,  # shuffle buffer → unbiased sample
     )
     log.info("Dataset: %d rows, %d domains: %s", dataset.num_rows, len(dataset.seq_domains),
              ",".join(dataset.seq_domains))
