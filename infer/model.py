@@ -351,7 +351,7 @@ class CrossAttention(nn.Module):
                 valid_count = valid_mask.sum(dim=1).clamp(min=1)  # (B,)
                 t_masked = tm * valid_mask.unsqueeze(1)  # (B, num_heads, L)
                 t_mean = t_masked.sum(dim=(1, 2)) / (valid_count * tm.shape[1])  # (B,)
-                t_max = (t_masked.amax(dim=2) * valid_mask).amax(dim=1)  # (B,)
+                t_max = t_masked.amax(dim=(1, 2))  # (B,)  max bias across all heads & valid positions
                 t_flat = t_masked.reshape(t_masked.shape[0], -1)  # (B, num_heads*L)
                 t_std = t_flat.std(dim=1)  # (B,)
                 peak_pos = tm.mean(dim=1).argmax(dim=1).float() / tm.shape[2]  # (B,) in [0,1]
