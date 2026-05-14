@@ -405,12 +405,12 @@ class PCVRHyFormerRankingTrainer:
 
             # ── AttnPool monitoring ──
             raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
-            if hasattr(raw, 'q_gen') and hasattr(raw.q_gen, 'attn_query'):
-                aq_norm = raw.q_gen.attn_query.norm(dim=-1).detach().cpu().numpy()
+            if hasattr(raw, 'query_generator') and hasattr(raw.query_generator, 'attn_query'):
+                aq_norm = raw.query_generator.attn_query.norm(dim=-1).detach().cpu().numpy()
                 aqn_str = "  ".join(f"d{i}={float(aq_norm[i]):.3f}" for i in range(len(aq_norm)))
                 logging.info(f"[Monitor] attn_query_norm: {aqn_str}")
-            if hasattr(raw, 'q_gen') and hasattr(raw.q_gen, '_last_attn_weights'):
-                aw = raw.q_gen._last_attn_weights
+            if hasattr(raw, 'query_generator') and hasattr(raw.query_generator, '_last_attn_weights'):
+                aw = raw.query_generator._last_attn_weights
                 if aw:
                     # Per-domain: mean entropy (low=peaked, high=spread)
                     for di, w in enumerate(aw):

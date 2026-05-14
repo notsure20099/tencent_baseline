@@ -350,7 +350,7 @@ def main() -> None:
     logging.info(f"[Monitor] Model: total={total_params:,} dense={dense_params:,} sparse={sparse_params:,}")
     logging.info(f"[Monitor] Data: rows={pcvr_dataset.num_rows} batch={args.batch_size} workers={args.num_workers}")
     logging.info(f"[Monitor] Data: seq_lens={args.seq_max_lens}")
-    logging.info(f"[Monitor] AttnPool: query_dim={model._orig_mod.q_gen.attn_query.shape}")
+    logging.info(f"[Monitor] AttnPool: query_dim={model._orig_mod.query_generator.attn_query.shape}")
 
     # ---- Training ----
     early_stopping = EarlyStopping(
