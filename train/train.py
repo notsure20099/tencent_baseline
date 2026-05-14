@@ -331,8 +331,9 @@ def main() -> None:
     }
 
     # ── Speed optimisations ──
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
+    # cudnn.benchmark disabled — dynamic seq lengths cause per-batch kernel re-search
+    # if torch.cuda.is_available():
+    #     torch.backends.cudnn.benchmark = True
     torch.set_float32_matmul_precision('high')
 
     model = PCVRHyFormer(**model_args).to(args.device)
