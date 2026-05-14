@@ -1,165 +1,163 @@
-# Experiment Log
-# =============
-# Format:  Date | Branch | Type(train/infer/explore) | Key Metrics | Verdict
+# 实验记录
+# ========
+# 格式：日期 | 分支 | 类型(train/infer/explore) | 关键指标 | 判定
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ═══════════════════════════════════════════════════════════════════════════════
 Exp33: RankMixerFull (d_model=76, full mode)
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-14
-  Branch:      exp33_rankmixer_full
-  Baseline:    Exp29 (Test AUC 0.84727)
-  Change:      d_model 64->76 → 76%19=0 & 76%4=0 → RankMixer full mode (no longer ffn_only)
-  Extra speed: cudnn.benchmark + foreach clip_grad
+  日期:        2026-05-14
+  分支:        exp33_rankmixer_full
+  基线:        Exp29 (Test AUC 0.84727)
+  改动:        d_model 从 64 改成 76 → 76%19=0 & 76%4=0 → RankMixer 进入 full mode
+               （不再退化为 ffn_only）
+  额外加速:    cudnn.benchmark + foreach clip_grad
 
   Valid AUC:   0.86394 / 0.86695 / 0.86717 / 0.86722 / 0.86750 / 0.86777 / 0.86757
-  Peak:        E6 0.86777 (ALL-TIME HIGH)
-  Monitor:
+  峰值:        E6 0.86777（训练以来最高）
+  监控指标:
     RankMixer: full T=19 d_model=76 OK
-    sep:       1.43 (locked from E4—E7)
-    time_bias: norm 8.63→10.02→11.83→12.97 (surge, +50%)
-  Verdict:     Best ckpt at E6 (step 45660). Full mode unlocked, but time_bias
-               overfit dominates the extra capacity. Must check Test AUC.
+    sep:       1.43（E4—E7 完全锁死）
+    time_bias: norm 8.63→10.02→11.83→12.97（暴涨 +50%）
+  判定:        E6（step 45660）是最佳 checkpoint。full mode 已打通，但多出来的容量
+               几乎全被 time_bias 的过拟合吃掉。必须等 Test AUC 终判。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Exp32: Capacity Rebalance (num_queries=2 + domain gates)
+Exp32: 容量重分配（num_queries=2 + domain gate）
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-13
-  Branch:      exp32_capacity_rebalance
-  Baseline:    Exp29
-  Change:      num_queries=2 (Q0: full, Q1: tail 50%) + per-domain learnable gates
-  Valid AUC:   0.86343 / 0.86677 / 0.86706 / ... / 0.86747 (E14)
-  Test AUC:    0.845305  (-0.00197 vs Exp29)
-  Verdict:     FAILED. Q tokens added but RankMixer in ffn_only → extra
-               capacity wasted; domain gates with 4 params too weak.
-               Also revealed: RankMixer has been in ffn_only since Exp27.
+  日期:        2026-05-13
+  分支:        exp32_capacity_rebalance
+  基线:        Exp29
+  改动:        num_queries=2（Q0: 全序列，Q1: 尾部50%窗口）+ 每条序列可学习 gate
+  Valid AUC:   0.86343 / 0.86677 / 0.86706 / ... / 0.86747（E14）
+  Test AUC:    0.845305（比 Exp29 低 0.00197）
+  判定:        无效。多出来的 Q token 在 RankMixer ffn_only 降级模式下被浪费；
+               4 个参数的 domain gate 太弱。
+               同时揭露了重要发现：RankMixer 从 Exp27 起一直处于 ffn_only 模式。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Exp32 (ours): TimeAwareSeqGate (per-dim multiplicative gate)
+Exp32（我们的）: TimeAwareSeqGate（逐维度乘法门控）
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-12
-  Branch:      exp32_timeaware_seqgate
-  Baseline:    Exp29
-  Change:      temporal_bias stats → Linear(4→64) → per-dim sigmoid gate on decoded_q
+  日期:        2026-05-12
+  分支:        exp32_timeaware_seqgate
+  基线:        Exp29
+  改动:        temporal_bias 的统计量 → Linear(4→64) → 逐维度 sigmoid gate，作用在 decoded_q 上
   Valid AUC:   0.8627 / 0.8658 / 0.8662 / 0.8665
-  Verdict:     FAILED. Below Exp29 baseline. Time signal injection
-               post-CrossAttention has negative marginal return.
+  判定:        无效。全程低于 Exp29 基线。在 CrossAttention 之后继续注入时间信号，
+               边际收益为负。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Exp31a: TimeBias MLP (nonlinear per-head smoothing)
+Exp31a: TimeBias MLP（非线性逐头平滑）
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-11
-  Branch:      exp31a_timebias_mlp
-  Baseline:    Exp29
-  Change:      Embedding(65,4)→MLP→per-head bias (nonlinear smoothing)
-  Valid:       ~0.86757
-  Test AUC:    0.846817 (-0.00045 vs Exp29)
-  Verdict:     MARGINAL. Valid higher but Test lower. MLP smoothing not worth
-               8.5K extra params.
+  日期:        2026-05-11
+  分支:        exp31a_timebias_mlp
+  基线:        Exp29
+  改动:        Embedding(65,4) → MLP → 逐头 bias（非线性平滑）
+  Valid AUC:   ~0.86757
+  Test AUC:    0.846817（比 Exp29 低 0.00045）
+  判定:        效果平平。Valid 更高但 Test 更低。8.5K 额外参数不值得。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Exp30: ContentAwareTimeBias (dynamic bias conditioned on query content)
+Exp30: ContentAwareTimeBias（用 query 内容动态调整时间偏差）
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-10
-  Branch:      exp30_content_aware_timebias
-  Baseline:    Exp29
-  Change:      time_bias conditioned on concat(query_context) via MLP
-  Test AUC:    0.842565 (-0.00471 vs Exp29)
-  Verdict:     FAILED HARD. Content injection into time bias hurts badly.
+  日期:        2026-05-10
+  分支:        exp30_content_aware_timebias
+  基线:        Exp29
+  改动:        把 time_bias 改成由 concat(query_context) 经 MLP 生成的动态偏差
+  Test AUC:    0.842565（比 Exp29 低 0.00471）
+  判定:        严重失败。把内容信号注入 time_bias 是错的。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Exp29: PerHeadTimeBias (CURRENT BASELINE)
+Exp29: PerHeadTimeBias（当前基线）
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-09
-  Branch:      exp29_perhead_timebias
-  Baseline:    Exp28
-  Change:      temporal_bias changed from Embedding(65,1) to Embedding(65,4)
-               → each head learns independent time preference
-  Test AUC:    0.84727  (BEST BASELINE)
-  Verdict:     CORE WIN. Per-head temporal bias is the single most impactful
-               change in the project history.
+  日期:        2026-05-09
+  分支:        exp29_perhead_timebias
+  基线:        Exp28
+  改动:        temporal_bias 从 Embedding(65,1) 改成 Embedding(65,4)
+               → 每个 attention head 学习独立的时间偏好
+  Test AUC:    0.84727（最优基线）
+  判定:        核心突破。逐头时间偏差是整个实验历史上最重要的一次改动。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Exp28: TimeBias Baseline
+Exp28: TimeBias 起点
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-08
-  Branch:      exp28_timebias_baseline
-  Change:      First time-bias in CrossAttention: Embedding(65,1) added to
-               attention scores pre-softmax
+  日期:        2026-05-08
+  分支:        exp28_timebias_baseline
+  改动:        首次引入 time_bias：Embedding(65,1) 的值加到 CrossAttention 的 softmax 之前
   Test AUC:    0.84632
-  Verdict:     SOLID. Time bias direction proven valid.
+  判定:        扎实的起点。时间偏差方向被证明有效。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Q4: Content vs Time shuffle ablation (diagnostic)
+Q4: 内容 vs 时间消融实验（诊断）
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-13
-  Branch:      exp_q4_content_vs_time
-  Purpose:     Shuffle time buckets vs shuffle fid order → measure AUC drop
-  Result:      (pending — EVAL_DATA_PATH needs training data with labels)
-  Verdict:     AWAITING RESULT
+  日期:        2026-05-13
+  分支:        exp_q4_content_vs_time
+  目的:        打乱 time bucket vs 打乱 fid 顺序 → 比较 AUC 下降幅度
+  结果:        （待定——EVAL_DATA_PATH 需要指向有 label 的训练数据）
+  判定:        等待结果
 
 ═══════════════════════════════════════════════════════════════════════════════
-Q1+Q3: Sequence data exploration (co-occurrence + behavioural patterns)
+Q1+Q3: 序列特征数据探索（共现 + 行为模式）
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-13
-  Branch:      exp29_perhead_timebias (train/explore_seq.py)
-  Method:      Pure data analysis, no model. 50K samples.
-  Q1:          100% fid pairs "significant" but max |diff| only 0.028
-               → FM Cross not worth doing.
-  Q3:          All sep ≤ 0.11 (len/density/diversity/latest_bucket)
-               → behavioural statistics not discriminative.
-  Verdict:     Shallow content features have NO differentiating power.
-               Deep content interaction (not shallow stats) is the path.
+  日期:        2026-05-13
+  分支:        exp29_perhead_timebias（train/explore_seq.py）
+  方法:        纯数据分析，不使用模型。5 万样本。
+  Q1:          100% 的 fid 对被统计检验为"显著"，但最大 |diff| 仅 0.028
+               → FM Cross（事件内特征交互）不值得做。
+  Q3:          所有指标的 sep ≤ 0.11（长度/密度/多样性/最近时间桶）
+               → 序列级浅层统计特征没有区分力。
+  判定:        序列的浅层内容特征（共现、长度、密度等）完全没有区分正负样本的能力。
+               如果要挖内容，必须走深层交互（事件间转移、序列自注意力），
+               而不是浅层统计特征。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Diagnosis: Exp32_capacity_rebalance model inspection
+诊断: Exp32_capacity_rebalance 模型权重检查
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-13
-  Branch:      exp32_capacity_rebalance_diagnose
-  Method:      Pure weight inspection (no eval)
-  Findings:    (pending — infer/model.py version mismatch on AngelML)
-  Verdict:     AWAITING RESULT
+  日期:        2026-05-13
+  分支:        exp32_capacity_rebalance_diagnose
+  方法:        纯权重检查（不跑 eval）
+  结果:        （待定——AngelML 上 infer/model.py 版本不匹配）
+  判定:        等待结果
 
 ═══════════════════════════════════════════════════════════════════════════════
-Architectural Finding: RankMixer has been in ffn_only mode since Exp27
+架构发现: RankMixer 从 Exp27 起一直处于 ffn_only 降级模式
 ═══════════════════════════════════════════════════════════════════════════════
-  Date:        2026-05-14 (discovered)
-  Root Cause:  Exp27 added dense_token_groups=4 → T=19.
-               d_model=64, 64%19≠0 → auto-fallback to ffn_only.
-               NO experiment since has used RankMixer full mode.
-  Impact:      Token mixing (cross-sequence interaction) has been skipped
-               across all experiments Exp27—Exp32.
-  Fix:         d_model must satisfy d_model%19=0 AND d_model%4=0.
-               Smallest: d_model=76 (LCM of 19 and 4).
-  Verified in: Exp33 (d_model=76 → full mode OK)
+  日期:        2026-05-14（发现）
+  根因:        Exp27 加了 dense_token_groups=4 → T=19。
+               d_model=64, 64%19≠0 → 自动降级到 ffn_only。
+               从那以后所有实验（Exp27—Exp32）的 RankMixer 都没进过 full mode。
+  影响:        Token mixing（序列间交互）从 Exp27 开始就被跳过了。
+  修复条件:    d_model 必须同时满足 d_model%19=0 和 d_model%4=0。
+               最小值：d_model=76（19 和 4 的最小公倍数）。
+  已验证于:    Exp33（d_model=76 → full mode 确认生效）
 
 ═══════════════════════════════════════════════════════════════════════════════
-QUICK REFERENCE: All Test AUCs
+Test AUC 汇总排行
 ═══════════════════════════════════════════════════════════════════════════════
-  Exp33          (d_model=76 RankMixer full)    PENDING
-  Exp29          (PerHeadTimeBias)              0.84727 ← BEST
-  Exp31a         (TimeBias MLP)                 0.846817
-  Exp28          (TimeBias baseline)            0.84632
-  Exp27          (dense_token_groups=4)         0.846087
-  Exp26          (dense_aware_qgen)             0.84579
-  Exp32_capacity (num_queries=2 + domain gate)  0.845305
-  Exp20          (ItemBridge)                   0.84444
-  Exp30          (ContentAwareTimeBias)         0.842565
+  Exp33          （d_model=76 RankMixer full）    等待中
+  Exp29          （PerHeadTimeBias）              0.84727 ← 最优
+  Exp31a         （TimeBias MLP）                 0.846817
+  Exp28          （TimeBias 起点）                0.84632
+  Exp27          （dense_token_groups=4）         0.846087
+  Exp26          （dense_aware_qgen）             0.84579
+  Exp32_capacity （num_queries=2 + domain gate）  0.845305
+  Exp20          （ItemBridge）                   0.84444
+  Exp30          （ContentAwareTimeBias）         0.842565
 
-  Valid ceiling: ~0.8675 across 7+ experiment groups.
-  Test range:    0.8425—0.8473 (5x wider than valid → valid is saturated).
+  Valid AUC 天花板: ~0.8675（7 组实验均在此震荡）
+  Test AUC 区间:    0.8425—0.8473（波动幅度是 valid 的 5 倍 → valid 已饱和）
 
 ═══════════════════════════════════════════════════════════════════════════════
-LESSONS LEARNED
+经验教训
 ═══════════════════════════════════════════════════════════════════════════════
-  1. Time is the single most important signal. Per-head time bias (Exp29)
-     is the only change with consistent >0.001 Test gain.
-  2. Post-CrossAttention time injection (Exp30/31a/32) is negative or zero.
-  3. Shallow content statistics (Q1/Q3) have zero differentiating power.
-  4. Valid AUC 0.8675 is a hard ceiling — do not use it to judge experiments.
-     Must use Test AUC as the ONLY terminal verdict.
-  5. RankMixer ffn_only degraded mode was a hidden bottleneck since Exp27.
-  6. Content signal path is 4-5x longer than time signal path — model
-     naturally gravitates toward time and ignores content.
-  7. Every experiment that "added parameters without fixing a bottleneck"
-     (Exp30/31a/32) hurt or had zero Test gain.
+  1. 时间是当前最重要且唯一被验证有效的信号。逐头 time_bias（Exp29）是迄今唯一
+     能稳定带来 >0.001 Test 收益的改动。
+  2. 在 CrossAttention 之后继续注入时间信号（Exp30/31a/32），边际收益为零或为负。
+  3. 序列的浅层统计特征（Q1/Q3 共现/密度/长度等）完全没有区分力。
+  4. Valid AUC 0.8675 是硬天花板——不能用它来评判实验方向。
+     必须以 Test AUC 作为唯一终判标准。
+  5. RankMixer ffn_only 降级模式从 Exp27 起一直是隐藏瓶颈。
+  6. 内容信号的传播路径比时间信号长 4-5 倍（embedding→proj→encoder→attn×2→pool→QG→CA
+     vs time_bucket→Embedding→softmax），模型天然倾向于走时间捷径，忽略内容。
+  7. 所有「加了参数但没有打通瓶颈」的实验（Exp30/31a/32）都导致了 Test AUC 下降或持平。
+     在没有打通瓶颈之前，增加参数只会增加过拟合。
