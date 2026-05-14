@@ -552,6 +552,34 @@ class PCVRHyFormerRankingTrainer:
         else:
             logloss = float('inf')
 
+        # ── Monitoring: structural health indicators ──
+        if hasattr(self.model, 'blocks') and len(self.model.blocks) > 0:
+            block0 = self.model.blocks[0]
+            mixer = block0.mixer
+            mixer_mode = mixer.mode if hasattr(mixer, 'mode') else 'unknown'
+            T = mixer.T if hasattr(mixer, 'T') else 0
+            D = mixer.D if hasattr(mixer, 'D') else 0
+            full_check = 'OK' if (mixer_mode == 'full' and D % T == 0) else 'DEGRADED'
+            logging.info(
+                f"[Monitor] RankMixer mode={mixer_mode} T={T} d_model={D} {D}%{T}={D%T if T else '?'} ({full_check})")
+
+            if model.blocks[0].cross_attns[0].use_time_bias:
+                tb = model.blocks[0].cross_attns[0].temporal_bias.weight.detach()
+                tb_norm = float(tb.norm())
+                tb_mean = float(tb[1:].mean())
+                logging.info(f"[Monitor] time_bias Block0 norm={tb_norm:.3f} mean={tb_mean:+.3f}")
+
+            # positive vs negative predicted probability divergence
+            probs_np = probs
+            labels_np_local = labels_np
+            if len(probs_np) > 0 and len(np.unique(labels_np_local)) >= 2:
+                pos_mask = labels_np_local == 1
+                neg_mask = labels_np_local == 0
+                pos_mean, pos_std = float(probs_np[pos_mask].mean()), float(probs_np[pos_mask].std())
+                neg_mean, neg_std = float(probs_np[neg_mask].mean()), float(probs_np[neg_mask].std())
+                sep = (pos_mean - neg_mean) / max((pos_std + neg_std) / 2, 1e-9)
+                logging.info(f"[Monitor] pred-prob pos={pos_mean:.3f}+-{pos_std:.3f} neg={neg_mean:.3f}+-{neg_std:.3f} sep={sep:.2f}")
+
         return auc, logloss
 
     def _evaluate_step(

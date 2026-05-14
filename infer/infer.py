@@ -432,6 +432,15 @@ def main() -> None:
     model.eval()
     logging.info("Model loaded successfully")
 
+    # ── Structural health check ──
+    if hasattr(model, 'blocks') and len(model.blocks) > 0:
+        mixer = model.blocks[0].mixer
+        rm_mode = mixer.mode if hasattr(mixer, 'mode') else 'unknown'
+        T = mixer.T if hasattr(mixer, 'T') else 0
+        D = mixer.D if hasattr(mixer, 'D') else 0
+        status = "FULL" if (rm_mode == 'full' and D % T == 0) else "DEGRADED"
+        logging.info(f"[Monitor] RankMixer mode={rm_mode} T={T} d_model={D} {D}%{T}={D%T if T else '?'} ({status})")
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         logging.info("Cleared CUDA cache before inference")
