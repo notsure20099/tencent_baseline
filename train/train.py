@@ -330,8 +330,13 @@ def main() -> None:
         "use_time_bias": args.use_time_bias,
     }
 
+    # ── Training speed optimisations ──
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision('high')
+
     model = PCVRHyFormer(**model_args).to(args.device)
-    model = torch.compile(model)
+    model = torch.compile(model, mode="default")
 
     # ── Model & dataset monitoring ──
     num_sequences = len(pcvr_dataset.seq_domains)
