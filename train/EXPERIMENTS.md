@@ -1,4 +1,38 @@
 ﻿
+
+Order Probe: sequence position  time mapping
+
+  date:        2026-05-15
+  branch:      exp35_tapered_posenc (train/probe_order.py)
+  method:      30 batches, no model, pure data read
+  result:      ALL 4 domains are recentold (position 0 = most recent)
+               seq_a: p0=41.0  p511=60.0
+               seq_b: p0=41.1  p511=59.7
+               seq_c: p0=45.4  p511=62.7
+               seq_d: p0=29.8  p511=53.5
+  implication: dist_to_end (position-based) maps valid pos500=days-old,
+               test pos500=hours-old  position encoding cannot generalize
+                all position-based optimisations are DOA for this task
+
+
+Exp35: TaperedPositionEncoding (learnable position gate in SeqEncoder)
+
+  date:        2026-05-14
+  branch:      exp35_tapered_posenc
+  baseline:    Exp29 (Test AUC 0.84727)
+  change:      4 params (1 per domain)  sigmoid(alpha * dist_to_end)
+  valid AUC:   E1=0.86360 E2=0.86621 E3=0.86684 E4=0.86696
+               E5=0.86730 E6=0.86735* E7=0.86725
+               peak E6, converged at +4 epochs
+  alpha final: seq_c=0 / seq_d=+0.057  matches domain ablation
+  test AUC:    0.84609 (-0.00118 from Exp29)
+  verdict:     FAIL. Position-based encoding cannot generalize when
+               train/test have different sequence lengths (different
+               absolute-time semantics at the same position index).
+  lesson:      content-path optimisation IS valid direction (alpha
+               converged to structurally meaningful values), but
+               must use time_bucket (absolute time) not position
+               (relative) for the encoding basis.
 Exp35: TaperedPositionEncoding (learnable position gate in SeqEncoder)
 
   date:        2026-05-14
