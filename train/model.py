@@ -630,6 +630,9 @@ class TransformerEncoder(nn.Module):
             nn.Dropout(dropout)
         )
 
+        # ── Tapered Position Encoding ──
+        self.pos_alpha = nn.Parameter(torch.tensor(0.0))
+
     def forward(
         self,
         x: torch.Tensor,
@@ -648,6 +651,16 @@ class TransformerEncoder(nn.Module):
         Returns:
             Tuple of (output tensor of shape (B, L, D), key_padding_mask).
         """
+        B, L, D = x.shape
+
+        # ── Tapered Position Encoding ──
+        valid = (~key_padding_mask).float() if key_padding_mask is not None else torch.ones(B, L, device=x.device)
+        max_pos = valid.sum(dim=1).clamp(min=1)                            # (B,)
+        pos_idx = torch.arange(L, device=x.device).float().unsqueeze(0)    # (1, L)
+        dist_to_end = (max_pos.unsqueeze(1) - 1 - pos_idx).clamp(min=0) / max_pos.unsqueeze(1).clamp(min=1)  # (B, L)  0=tail
+        gate = torch.sigmoid(self.pos_alpha * (1.0 - dist_to_end))          # (B, L)  1 at tail
+        x = x * (1.0 + gate.unsqueeze(-1))
+
         # Self-Attention (Pre-LN) with RoPE
         residual = x
         x = self.norm1(x)

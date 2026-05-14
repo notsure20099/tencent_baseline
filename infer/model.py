@@ -258,6 +258,10 @@ class CrossAttention(nn.Module):
     When ``use_item_bridge=True``, an item-identity gate is fused into Q so
     that cross-attention focuses on sequence events relevant to the current
     item being predicted.
+
+    When ``use_time_bias=True``, a learnable per-time-bucket scalar bias is
+    added to attention scores so that more recent sequence events naturally
+    receive higher attention.
     """
 
     def __init__(
@@ -626,6 +630,9 @@ class TransformerEncoder(nn.Module):
             nn.Dropout(dropout)
         )
 
+        # ── Tapered Position Encoding ──
+        self.pos_alpha = nn.Parameter(torch.tensor(0.0))
+
     def forward(
         self,
         x: torch.Tensor,
@@ -644,6 +651,16 @@ class TransformerEncoder(nn.Module):
         Returns:
             Tuple of (output tensor of shape (B, L, D), key_padding_mask).
         """
+        B, L, D = x.shape
+
+        # ── Tapered Position Encoding ──
+        valid = (~key_padding_mask).float() if key_padding_mask is not None else torch.ones(B, L, device=x.device)
+        max_pos = valid.sum(dim=1).clamp(min=1)                            # (B,)
+        pos_idx = torch.arange(L, device=x.device).float().unsqueeze(0)    # (1, L)
+        dist_to_end = (max_pos.unsqueeze(1) - 1 - pos_idx).clamp(min=0) / max_pos.unsqueeze(1).clamp(min=1)  # (B, L)  0=tail
+        gate = torch.sigmoid(self.pos_alpha * (1.0 - dist_to_end))          # (B, L)  1 at tail
+        x = x * (1.0 + gate.unsqueeze(-1))
+
         # Self-Attention (Pre-LN) with RoPE
         residual = x
         x = self.norm1(x)
@@ -933,7 +950,6 @@ class MultiSeqHyFormerBlock(nn.Module):
         self.num_queries = num_queries
         self.num_ns = num_ns
 
-        # Independent sequence encoder per sequence
         self.seq_encoders = nn.ModuleList([
             create_sequence_encoder(
                 encoder_type=seq_encoder_type,
@@ -947,7 +963,6 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
-        # Independent cross-attention per sequence
         self.cross_attns = nn.ModuleList([
             CrossAttention(
                 d_model=d_model,
@@ -961,7 +976,6 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
-        # RankMixer: input token count = Nq * S + Nns
         n_total = num_queries * num_sequences + num_ns
         self.mixer = RankMixerBlock(
             d_model=d_model,

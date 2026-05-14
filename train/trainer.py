@@ -403,6 +403,16 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
+            # ── Tapered pos-alpha tracking ──
+            raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+            if hasattr(raw, 'blocks') and len(raw.blocks) > 0:
+                for b_idx, block in enumerate(raw.blocks):
+                    for s_idx in range(block.num_sequences):
+                        enc = block.seq_encoders[s_idx]
+                        if hasattr(enc, 'pos_alpha'):
+                            pa = enc.pos_alpha.item()
+                            logging.info(f"[Monitor] block{b_idx}_seq{s_idx} pos_alpha={pa:+.4f}")
+
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
