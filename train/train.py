@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
                         help='Per-domain sequence truncation, format: seq_d:256,seq_c:128')
 
     # Model hyperparameters.
-    parser.add_argument('--d_model', type=int, default=64,
+    parser.add_argument('--d_model', type=int, default=57,
                         help='Backbone hidden dimension (output size of each block)')
     parser.add_argument('--emb_dim', type=int, default=64,
                         help='Per-Embedding-table dimension (before projection)')
