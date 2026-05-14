@@ -309,6 +309,7 @@ class CrossAttention(nn.Module):
         rope_sin: Optional[torch.Tensor] = None,
         item_token: Optional[torch.Tensor] = None,
         key_time_buckets: Optional[torch.Tensor] = None,
+        skip_time_bias: bool = False,
     ) -> torch.Tensor:
         """Computes cross-attention between query tokens and sequence tokens.
 
@@ -322,6 +323,8 @@ class CrossAttention(nn.Module):
             key_time_buckets: (B, L), time bucket ids for each sequence
                 position. Used to look up per-position temporal bias when
                 ``use_time_bias=True``.
+            skip_time_bias: if True, suppress time_bias even when
+                use_time_bias=True (used by Time Residual Add-Back).
 
         Returns:
             Output tensor of shape (B, Nq, D).
@@ -339,7 +342,7 @@ class CrossAttention(nn.Module):
             key_value = self.norm_kv(key_value)
 
         time_bias = None
-        if self.use_time_bias and key_time_buckets is not None:
+        if self.use_time_bias and key_time_buckets is not None and not skip_time_bias:
             time_bias = self.temporal_bias(key_time_buckets)  # (B, L, num_heads)
             time_bias = time_bias.transpose(1, 2)  # (B, num_heads, L)
 
@@ -1020,32 +1023,52 @@ class MultiSeqHyFormerBlock(nn.Module):
             next_seqs.append(next_seq_i)
             next_masks.append(mask_i)
 
-        # 2. Independent Query Decoding per sequence
+        # 2. Independent Query Decoding per sequence (with + without time_bias)
         decoded_qs = []
+        pure_q_list = []
+        time_residuals = []
         for i in range(S):
             rc = rope_cos_list[i] if rope_cos_list is not None else None
             rs = rope_sin_list[i] if rope_sin_list is not None else None
             tb = seq_time_buckets_list[i] if seq_time_buckets_list is not None else None
+
+            # ① Normal CrossAttention: with time_bias (preserves per-position time selection)
             decoded_q_i = self.cross_attns[i](
                 q_tokens_list[i], next_seqs[i], next_masks[i],
                 rope_cos=rc, rope_sin=rs,
                 item_token=item_tokens,
                 key_time_buckets=tb,
             )
-            decoded_qs.append(decoded_q_i)
 
-        # 3. Token Fusion: concatenate all decoded_q + ns_tokens
-        combined = torch.cat(decoded_qs + [ns_tokens], dim=1)  # (B, Nq*S + Nns, D)
+            # ② Pure content CrossAttention: time_bias suppressed
+            pure_q_i = self.cross_attns[i](
+                q_tokens_list[i], next_seqs[i], next_masks[i],
+                rope_cos=rc, rope_sin=rs,
+                item_token=item_tokens,
+                key_time_buckets=tb,
+                skip_time_bias=True,
+            )
+
+            # ③ Time residual = decoded_q - pure_q (time contribution, per-domain independent)
+            time_residual_i = decoded_q_i - pure_q_i
+            decoded_qs.append(decoded_q_i)
+            pure_q_list.append(pure_q_i)
+            time_residuals.append(time_residual_i)
+
+        # 3. Token Fusion: use only pure content Q for clean mixing (no time contamination)
+        combined = torch.cat(pure_q_list + [ns_tokens], dim=1)  # (B, Nq*S + Nns, D)
 
         # 4. Query Boosting
         boosted = self.mixer(combined)  # (B, Nq*S + Nns, D)
 
-        # 5. Split back into per-sequence Q and NS
+        # 5. Split back into per-sequence Q and NS, then add back per-domain time residual
         next_q_list = []
         offset = 0
         for i in range(S):
-            next_q_list.append(boosted[:, offset:offset + Nq, :])
+            enriched_q_i = boosted[:, offset:offset + Nq, :]
             offset += Nq
+            # Add back per-domain time residual → preserves time signal, mixing stays clean
+            next_q_list.append(enriched_q_i + time_residuals[i])
         next_ns = boosted[:, offset:, :]
 
         return next_q_list, next_ns, next_seqs, next_masks

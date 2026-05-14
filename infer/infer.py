@@ -22,6 +22,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -72,6 +73,175 @@ def _log_gpu_memory(tag: str = '') -> None:
         pass
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Model & Data Diagnostic Functions (infer stage)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _run_model_diagnose(model: nn.Module) -> None:
+    """打印模型结构与权重诊断信息。"""
+    logging.info("=" * 60)
+    logging.info("[Diagnose] 模型结构诊断开始")
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info(f"[Diagnose] 总参数量: {total_params:,}  可训练: {trainable_params:,}")
+
+    emb_count = 0
+    emb_total_vocab = 0
+    for m in model.modules():
+        if isinstance(m, nn.Embedding):
+            emb_count += 1
+            emb_total_vocab += m.num_embeddings
+    logging.info(f"[Diagnose] Embedding 表数量: {emb_count}  总词表大小: {emb_total_vocab:,}")
+
+    if hasattr(model, 'blocks') and len(model.blocks) > 0:
+        for block_idx, block in enumerate(model.blocks):
+            mixer = block.mixer
+            rm_mode = mixer.mode if hasattr(mixer, 'mode') else 'unknown'
+            T_val = mixer.T if hasattr(mixer, 'T') else 0
+            D_val = mixer.D if hasattr(mixer, 'D') else 0
+            full_check = 'OK' if (rm_mode == 'full' and T_val > 0 and D_val % T_val == 0) else 'DEGRADED'
+            logging.info(
+                f"[Diagnose] Block{block_idx} RankMixer mode={rm_mode} T={T_val} d_model={D_val} "
+                f"{D_val}%{T_val}={D_val % T_val if T_val else '?'} ({full_check})")
+
+            if hasattr(block, 'cross_attns'):
+                for ca_idx, ca in enumerate(block.cross_attns):
+                    if hasattr(ca, 'use_time_bias') and ca.use_time_bias:
+                        tb = ca.temporal_bias.weight.detach().cpu()
+                        tb_norm = float(tb.norm())
+                        tb_mean = float(tb[1:].mean())
+                        domain_map = {0: 'seq_a', 1: 'seq_b', 2: 'seq_c', 3: 'seq_d'}
+                        domain = domain_map.get(ca_idx, f'ca_{ca_idx}')
+                        logging.info(
+                            f"[Diagnose] Block{block_idx} time_bias {domain} "
+                            f"norm={tb_norm:.3f} mean={tb_mean:+.3f}")
+
+    cfg_items = {
+        'd_model': model.d_model, 'emb_dim': model.emb_dim,
+        'num_queries': model.num_queries, 'num_sequences': model.num_sequences,
+        'num_ns': model.num_ns, 'rank_mixer_mode': model.rank_mixer_mode,
+        'use_time_bias': model.use_time_bias, 'use_rope': model.use_rope,
+        'ns_tokenizer_type': model.ns_tokenizer_type, 'seq_domains': model.seq_domains,
+    }
+    for k, v in cfg_items.items():
+        logging.info(f"[Diagnose] cfg.{k} = {v}")
+
+    logging.info("[Diagnose] 模型结构诊断结束")
+    logging.info("=" * 60)
+
+
+def _run_test_seq_explore(
+    test_dataset: PCVRParquetDataset,
+    model: nn.Module,
+    device: str,
+    num_workers: int,
+    sample_batches: int = 20,
+) -> None:
+    """对测试集前 sample_batches 批进行序列特征探索（独立 DataLoader）。"""
+    logging.info("=" * 60)
+    logging.info(f"[Diagnose] 测试集序列探索开始 (采样 {sample_batches} 批)")
+
+    explore_loader = DataLoader(
+        test_dataset, batch_size=None, num_workers=num_workers,
+        prefetch_factor=2 if num_workers > 0 else None, pin_memory=False,
+    )
+
+    seq_domains = model.seq_domains
+    all_lens = {d: [] for d in seq_domains}
+    all_tb = {d: [] for d in seq_domains}
+    all_density = {d: [] for d in seq_domains}
+
+    batch_count = 0
+    with torch.no_grad():
+        for batch in explore_loader:
+            if batch_count >= sample_batches:
+                break
+            for domain in seq_domains:
+                seq_len_tensor = batch.get(f'{domain}_len')
+                seq_data_tensor = batch.get(domain)
+                seq_tb_tensor = batch.get(f'{domain}_time_bucket')
+                if seq_len_tensor is not None:
+                    all_lens[domain].append(seq_len_tensor.numpy().astype(np.int32))
+                if seq_data_tensor is not None:
+                    B, S, L = seq_data_tensor.shape
+                    non_zero = (seq_data_tensor.numpy() != 0).astype(np.float32).sum(axis=(1, 2))
+                    all_density[domain].append((non_zero / (S * L)).astype(np.float32))
+                if seq_tb_tensor is not None:
+                    all_tb[domain].append(seq_tb_tensor.numpy().astype(np.int32))
+            batch_count += 1
+
+    logging.info(f"[Diagnose] 实际采样批次: {batch_count}")
+    for domain in seq_domains:
+        if all_lens[domain]:
+            lens = np.concatenate(all_lens[domain])
+            logging.info(
+                f"[Diagnose] {domain} 序列长度: min={lens.min():.0f} max={lens.max():.0f} "
+                f"mean={lens.mean():.1f} median={np.median(lens):.1f} std={lens.std():.1f} "
+                f"样本数={len(lens)}")
+        if all_density[domain]:
+            dens = np.concatenate(all_density[domain])
+            logging.info(
+                f"[Diagnose] {domain} fid非零密度: min={dens.min():.4f} max={dens.max():.4f} "
+                f"mean={dens.mean():.4f} std={dens.std():.4f}")
+        if all_tb[domain]:
+            tbs = np.concatenate(all_tb[domain])
+            non_zero = tbs[tbs > 0]
+            if len(non_zero) > 0:
+                pcts = [10, 25, 50, 75, 90]
+                pct_vals = np.percentile(non_zero, pcts)
+                pct_str = " ".join(f"P{p}={pct_vals[i]:.0f}" for i, p in enumerate(pcts))
+                logging.info(
+                    f"[Diagnose] {domain} time_bucket(非零): "
+                    f"比例={len(non_zero)/len(tbs.ravel()):.2%} "
+                    f"min={non_zero.min()} max={non_zero.max()} mean={non_zero.mean():.1f} {pct_str}")
+            else:
+                logging.info(f"[Diagnose] {domain} time_bucket: 全部为0")
+
+    if len(seq_domains) >= 2:
+        logging.info("[Diagnose] 跨域序列长度相关系数矩阵:")
+        lens_matrix = [np.concatenate(all_lens[d]) for d in seq_domains if all_lens[d]]
+        if len(lens_matrix) >= 2:
+            corr = np.corrcoef(lens_matrix)
+            header = "        " + " ".join(f"{d:>8s}" for d in seq_domains)
+            logging.info(header)
+            for i, d in enumerate(seq_domains):
+                row = " ".join(f"{corr[i][j]:8.3f}" for j in range(len(seq_domains)))
+                logging.info(f"{d:>8s} {row}")
+
+    logging.info("[Diagnose] 测试集序列探索结束")
+    logging.info("=" * 60)
+
+
+def _run_pred_dist_diagnose(all_probs: list) -> None:
+    """打印预测概率分布诊断。"""
+    logging.info("=" * 60)
+    logging.info("[Diagnose] 预测概率分布诊断")
+
+    probs_np = np.array(all_probs, dtype=np.float32)
+    pcts = [1, 5, 10, 25, 50, 75, 90, 95, 99]
+    pct_vals = np.percentile(probs_np, pcts)
+    pct_str = " ".join(f"P{p}={pct_vals[i]:.4f}" for i, p in enumerate(pcts))
+    logging.info(
+        f"[Diagnose] 预测概率: N={len(probs_np)} "
+        f"min={probs_np.min():.4f} max={probs_np.max():.4f} "
+        f"mean={probs_np.mean():.4f} std={probs_np.std():.4f}")
+    logging.info(f"[Diagnose] 百分位: {pct_str}")
+
+    bins = [0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0]
+    hist, _ = np.histogram(probs_np, bins=bins)
+    total = len(probs_np)
+    bin_desc = []
+    for i in range(len(bins) - 1):
+        if hist[i] > 0:
+            bin_desc.append(f"[{bins[i]:.2f},{bins[i+1]:.2f})={hist[i]/total:.2%}")
+    logging.info(f"[Diagnose] 概率分布: {' | '.join(bin_desc)}")
+
+    logging.info("[Diagnose] 预测概率分布诊断结束")
+    logging.info("=" * 60)
+
+
 # Fallback values used only when ``train_config.json`` is missing from the
 # ckpt directory.
 #
@@ -84,7 +254,7 @@ def _log_gpu_memory(tag: str = '') -> None:
 # When the feature is enabled we therefore use the constant exposed by the
 # dataset module; ``0`` means disabled.
 _FALLBACK_MODEL_CFG = {
-    'd_model': 64,
+    'd_model': 76,
     'emb_dim': 64,
     'num_queries': 1,
     'num_hyformer_blocks': 2,
@@ -542,6 +712,9 @@ def main() -> None:
     model.eval()
     logging.info("Model loaded successfully")
 
+    # ── 模型诊断 ──
+    _run_model_diagnose(model)
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         logging.info("Cleared CUDA cache before inference")
@@ -582,6 +755,9 @@ def main() -> None:
         pin_memory=torch.cuda.is_available(),
     )
 
+    # ── 测试集序列探索 (独立 DataLoader，不影响主推理) ──
+    _run_test_seq_explore(test_dataset, model, device, num_workers)
+
     all_probs = []
     all_user_ids = []
     logging.info("Starting inference...")
@@ -605,6 +781,9 @@ def main() -> None:
         raise e
 
     logging.info(f"Inference complete: {len(all_probs)} predictions")
+
+    # ── 预测概率分布诊断 ──
+    _run_pred_dist_diagnose(all_probs)
 
     predictions = {
         "predictions": dict(zip(all_user_ids, all_probs)),

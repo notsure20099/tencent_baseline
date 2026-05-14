@@ -552,6 +552,64 @@ class PCVRHyFormerRankingTrainer:
         else:
             logloss = float('inf')
 
+        # ── Monitoring: structural health indicators ──
+        if hasattr(self.model, 'blocks') and len(self.model.blocks) > 0:
+            block0 = self.model.blocks[0]
+            mixer = block0.mixer
+            mixer_mode = mixer.mode if hasattr(mixer, 'mode') else 'unknown'
+            T_val = mixer.T if hasattr(mixer, 'T') else 0
+            D_val = mixer.D if hasattr(mixer, 'D') else 0
+            full_check = 'OK' if (mixer_mode == 'full' and D_val % T_val == 0) else 'DEGRADED'
+            logging.info(
+                f"[Monitor] RankMixer mode={mixer_mode} T={T_val} d_model={D_val} "
+                f"{D_val}%{T_val}={D_val % T_val if T_val else '?'} ({full_check})")
+
+            # time_bias stats (Block0, each cross_attn)
+            if hasattr(block0, 'cross_attns'):
+                for ca_idx, ca in enumerate(block0.cross_attns):
+                    if hasattr(ca, 'use_time_bias') and ca.use_time_bias:
+                        tb = ca.temporal_bias.weight.detach()
+                        tb_norm = float(tb.norm())
+                        tb_mean = float(tb[1:].mean())
+                        logging.info(
+                            f"[Monitor] time_bias Block0 ca[{ca_idx}] "
+                            f"norm={tb_norm:.3f} mean={tb_mean:+.3f}")
+
+            # Time residual norms (Exp34: measure time_bias contribution per domain)
+            # computed from temporal_bias embedding since residual is decoded_q - pure_q
+            # approximate magnitude via temporal_bias weight norm
+            if hasattr(block0, 'cross_attns'):
+                for ca_idx, ca in enumerate(block0.cross_attns):
+                    if hasattr(ca, 'use_time_bias') and ca.use_time_bias:
+                        tb_w = ca.temporal_bias.weight.detach()
+                        # time_residual ≈ softmax_perturbation from time_bias
+                        # proxy: std of time_bias values as indicator of per-position variation
+                        tb_std = float(tb_w[1:].std())
+                        if ca_idx == 0:
+                            domain = 'seq_a'
+                        elif ca_idx == 1:
+                            domain = 'seq_b'
+                        elif ca_idx == 2:
+                            domain = 'seq_c'
+                        else:
+                            domain = f'ca_{ca_idx}'
+                        logging.info(
+                            f"[Monitor] time_residual_proxy {domain} "
+                            f"norm={float(tb_w.norm()):.3f} std={tb_std:.3f}")
+
+            # positive vs negative predicted probability divergence
+            if len(probs) > 0 and len(np.unique(labels_np)) >= 2:
+                pos_mask = labels_np == 1
+                neg_mask = labels_np == 0
+                pos_mean = float(probs[pos_mask].mean())
+                pos_std = float(probs[pos_mask].std())
+                neg_mean = float(probs[neg_mask].mean())
+                neg_std = float(probs[neg_mask].std())
+                sep = (pos_mean - neg_mean) / max((pos_std + neg_std) / 2, 1e-9)
+                logging.info(
+                    f"[Monitor] pred-prob pos={pos_mean:.3f}+-{pos_std:.3f} "
+                    f"neg={neg_mean:.3f}+-{neg_std:.3f} sep={sep:.2f}")
+
         return auc, logloss
 
     def _evaluate_step(
