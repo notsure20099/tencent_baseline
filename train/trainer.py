@@ -487,7 +487,7 @@ class PCVRHyFormerRankingTrainer:
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=True)
 
         self.dense_optimizer.step()
         if self.sparse_optimizer is not None:
