@@ -351,7 +351,8 @@ def main() -> None:
     logging.info(f"[Monitor] Model: total={total_params:,} dense={dense_params:,} sparse={sparse_params:,}")
     logging.info(f"[Monitor] Data: rows={pcvr_dataset.num_rows} batch={args.batch_size} workers={args.num_workers}")
     logging.info(f"[Monitor] Data: seq_lens={args.seq_max_lens}")
-    logging.info(f"[Monitor] AttnPool: query_dim={model._orig_mod.query_generator.attn_query.shape}")
+    raw = model._orig_mod if hasattr(model, '_orig_mod') else model
+    logging.info(f"[Monitor] AttnPool: query_dim={raw.query_generator.attn_query.shape}")
 
     # ---- Training ----
     early_stopping = EarlyStopping(
