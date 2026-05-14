@@ -310,6 +310,191 @@ def get_ckpt_path() -> Optional[str]:
     return None
 
 
+def _run_capacity_diagnose(model):
+    """Diagnose Exp32_capacity model — pure weight inspection, no data."""
+    import numpy as np
+    num_blocks = len(model.blocks)
+    num_seqs = model.blocks[0].num_sequences
+    num_heads = model.blocks[0].cross_attns[0].attn.num_heads
+    num_queries = model.blocks[0].num_queries
+
+    log = logging.getLogger("diagnose")
+    sep = "-" * 62
+
+    def _p(s):
+        logging.info(s)
+
+    _p("=" * 62)
+    _p("Exp32_capacity_rebalance — Model Diagnosis")
+    _p(f"blocks={num_blocks}  sequences={num_seqs}  heads={num_heads}  queries={num_queries}")
+    _p(sep)
+
+    # ── 1. Domain Gates ──
+    _p("1. DOMAIN GATES (per-block)")
+    for bi, block in enumerate(model.blocks):
+        gates = block.domain_gates.detach().cpu().numpy()  # (S,)
+        labels = ",".join(f"{g:+.3f}" for g in gates)
+        _p(f"  Block{bi}: [{labels}]  sum={gates.sum():.3f}  range=[{gates.min():+.3f},{gates.max():+.3f}]")
+        # which domain is strongest/weakest
+        top = int(np.argmax(gates))
+        bot = int(np.argmin(gates))
+        _p(f"    strongest=seq_{top}  weakest=seq_{bot}  ratio={gates[top]/max(abs(gates[bot]),1e-6):.1f}x")
+    _p("")
+
+    # ── 2. Q Token FFN divergence (Q0 full vs Q1 tail) ──
+    if hasattr(model, 'query_generator'):
+        qg = model.query_generator
+        if hasattr(qg, 'query_ffns_per_seq') and num_queries >= 2:
+            _p("2. Q TOKEN FFN DIVERGENCE (Q0-full vs Q1-tail)")
+            for si in range(num_seqs):
+                w0 = qg.query_ffns_per_seq[si][0][0].weight  # first Linear of Q0
+                w1 = qg.query_ffns_per_seq[si][1][0].weight  # first Linear of Q1
+                cos = float(torch.cosine_similarity(w0.flatten(), w1.flatten(), dim=0))
+                l2 = float((w0 - w1).norm())
+                _p(f"  seq_{si}: cosine(Q0,Q1)={cos:+.4f}  ||W0-W1||={l2:.3f}")
+            _p("")
+    else:
+        _p("2. Q TOKEN DIVERGENCE: query_generator not found, skipping")
+        _p("")
+
+    # ── 3. Per-Head Time Bias ──
+    _p("3. PER-HEAD TIME BIAS (Block0 CrossAttn0)")
+    ca = model.blocks[0].cross_attns[0]
+    if ca.use_time_bias:
+        w0 = ca.temporal_bias.weight.detach().cpu().numpy()  # (65, H)
+        for h in range(num_heads):
+            vals = w0[1:, h]  # exclude padding bucket
+            top3 = np.argsort(vals)[::-1][:3]
+            top_labels = ",".join(f"b{ti+1}:{vals[ti]:+.2f}" for ti in top3)
+            _p(f"  H{h}: mean={vals.mean():+.3f} std={vals.std():.3f} [{vals.min():+.2f},{vals.max():+.2f}] top3={{{top_labels}}}")
+
+        # overlap
+        top5_sets = [set(np.argsort(w0[1:, h])[::-1][:5]) for h in range(num_heads)]
+        overlaps = []
+        for h1 in range(num_heads):
+            for h2 in range(h1 + 1, num_heads):
+                j = len(top5_sets[h1] & top5_sets[h2]) / max(1, len(top5_sets[h1] | top5_sets[h2]))
+                overlaps.append(j)
+        avg_ov = float(np.mean(overlaps)) if overlaps else 1.0
+        _p(f"  head overlap (Jaccard top5): {avg_ov:.2f}  (0=fully distinct, 1=identical)")
+
+        # curve shape
+        n_step = 0
+        for h in range(num_heads):
+            vals = w0[1:, h]
+            diffs = np.abs(np.diff(vals))
+            n_jumps = int((diffs > 2 * float(diffs.mean())).sum())
+            if n_jumps >= 3:
+                n_step += 1
+        _p(f"  step heads: {n_step}/{num_heads}  (>2 jumps = step)")
+        _p("")
+    else:
+        _p("3. PER-HEAD TIME BIAS: disabled, skipping")
+        _p("")
+
+    # ── 4. Cross-Block Time Bias Stability ──
+    if num_blocks > 1:
+        _p("4. CROSS-BLOCK TIME BIAS STABILITY")
+        for s_idx in range(num_seqs):
+            ca0 = model.blocks[0].cross_attns[s_idx]
+            ca1 = model.blocks[1].cross_attns[s_idx]
+            if not ca0.use_time_bias or not ca1.use_time_bias:
+                _p(f"  seq_{s_idx}: time_bias disabled in one block, skip")
+                continue
+            w0 = ca0.temporal_bias.weight.detach().cpu().numpy()
+            w1 = ca1.temporal_bias.weight.detach().cpu().numpy()
+            f0, f1 = w0[1:, :].flatten(), w1[1:, :].flatten()
+            cos = float(np.dot(f0, f1) / (np.linalg.norm(f0) * np.linalg.norm(f1)))
+            corrs = [float(np.corrcoef(w0[1:, h], w1[1:, h])[0, 1]) for h in range(num_heads)]
+            _p(f"  seq_{s_idx}: cosine={cos:+.4f}  per-head corr={[f'{c:+.3f}' for c in corrs]}")
+        _p("")
+
+    # ── 5. QUERY GENERATOR weight norms ──
+    if hasattr(model, 'query_generator'):
+        qg = model.query_generator
+        _p("5. QUERY GENERATOR WEIGHT NORMS")
+        for si in range(num_seqs):
+            norms = []
+            for q in range(num_queries):
+                w = qg.query_ffns_per_seq[si][q][0].weight
+                norms.append(float(w.norm()))
+            _p(f"  seq_{si}: " + "  ".join(f"Q{q}:{n:.3f}" for q, n in enumerate(norms)))
+        _p("")
+
+    # ── Summary ──
+    _p(sep)
+    _p("SUMMARY & INTERPRETATION")
+    _p(sep)
+
+    issues = []
+
+    # domain gate check
+    for bi, block in enumerate(model.blocks):
+        gates = block.domain_gates.detach().cpu().numpy()
+        if abs(float(gates.sum()) - 4.0) > 1.0:
+            issues.append(f"domain gates in Block{bi} sum={gates.sum():.2f} (far from 4.0)")
+        r = gates.max() / max(abs(gates.min()), 1e-6)
+        if r < 1.5:
+            issues.append(f"domain gates in Block{bi} nearly uniform (ratio={r:.1f}x)")
+
+    # Q token divergence check
+    if hasattr(model, 'query_generator') and num_queries >= 2:
+        qg = model.query_generator
+        cos_vals = []
+        for si in range(num_seqs):
+            w0 = qg.query_ffns_per_seq[si][0][0].weight
+            w1 = qg.query_ffns_per_seq[si][1][0].weight
+            cos_vals.append(float(torch.cosine_similarity(w0.flatten(), w1.flatten(), dim=0)))
+        avg_cos = sum(cos_vals)/len(cos_vals)
+        if avg_cos > 0.95:
+            issues.append(f"Q0-Q1 nearly identical (avg cosine={avg_cos:.4f}) — extra Q wasted")
+        elif avg_cos < 0.5:
+            _p(f"  [+] Q0-Q1 well differentiated (avg cosine={avg_cos:.4f})")
+        else:
+            _p(f"  [~] Q0-Q1 moderately distinct (avg cosine={avg_cos:.4f})")
+
+    # time bias check
+    if model.blocks[0].cross_attns[0].use_time_bias:
+        w0 = model.blocks[0].cross_attns[0].temporal_bias.weight.detach().cpu().numpy()
+        top5_sets = [set(np.argsort(w0[1:, h])[::-1][:5]) for h in range(num_heads)]
+        ov = []
+        for h1 in range(num_heads):
+            for h2 in range(h1+1, num_heads):
+                ov.append(len(top5_sets[h1]&top5_sets[h2])/max(1,len(top5_sets[h1]|top5_sets[h2])))
+        avg_ov = float(np.mean(ov)) if ov else 1.0
+        if avg_ov < 0.15:
+            _p(f"  [+] heads highly differentiated (overlap={avg_ov:.2f})")
+        elif avg_ov < 0.4:
+            _p(f"  [~] heads moderately distinct (overlap={avg_ov:.2f})")
+        else:
+            issues.append(f"heads too similar (overlap={avg_ov:.2f}) — multi-head wasted")
+
+    # cross-block
+    if num_blocks > 1:
+        cos_vals = []
+        for s_idx in range(num_seqs):
+            ca0 = model.blocks[0].cross_attns[s_idx]
+            ca1 = model.blocks[1].cross_attns[s_idx]
+            if ca0.use_time_bias and ca1.use_time_bias:
+                w0 = ca0.temporal_bias.weight.detach().cpu().numpy()[1:,:].flatten()
+                w1 = ca1.temporal_bias.weight.detach().cpu().numpy()[1:,:].flatten()
+                cos_vals.append(float(np.dot(w0,w1)/(np.linalg.norm(w0)*np.linalg.norm(w1))+1e-9))
+        if cos_vals:
+            avg_cb_cos = sum(cos_vals)/len(cos_vals)
+            if avg_cb_cos > 0.8:
+                issues.append(f"cross-block time bias too similar ({avg_cb_cos:.2f}) — 2nd block may be redundant")
+            else:
+                _p(f"  [+] cross-block time bias differentiated (cos={avg_cb_cos:.3f})")
+
+    if issues:
+        _p("  Issues found:")
+        for iss in issues:
+            _p(f"    [!] {iss}")
+    else:
+        _p("  No major issues detected. Model structure looks healthy.")
+    _p("=" * 62)
+
+
 def _batch_to_model_input(
     batch: Dict[str, Any],
     device: str,
@@ -437,6 +622,11 @@ def main() -> None:
         logging.info("Cleared CUDA cache before inference")
 
     _log_gpu_memory('before_inference')
+
+    # ── Diagnostic mode: inspect model weights (no eval) ──
+    if os.environ.get('CAPACITY_DIAGNOSE', '').lower() in ('true', '1', 'yes'):
+        _run_capacity_diagnose(model)
+        return
 
     test_loader = DataLoader(
         test_dataset,
