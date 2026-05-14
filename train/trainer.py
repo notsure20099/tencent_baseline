@@ -403,6 +403,24 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
+            # ── AttnPool monitoring ──
+            raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+            if hasattr(raw, 'q_gen') and hasattr(raw.q_gen, 'attn_query'):
+                aq_norm = raw.q_gen.attn_query.norm(dim=-1).detach().cpu().numpy()
+                aqn_str = "  ".join(f"d{i}={float(aq_norm[i]):.3f}" for i in range(len(aq_norm)))
+                logging.info(f"[Monitor] attn_query_norm: {aqn_str}")
+            if hasattr(raw, 'q_gen') and hasattr(raw.q_gen, '_last_attn_weights'):
+                aw = raw.q_gen._last_attn_weights
+                if aw:
+                    # Per-domain: mean entropy (low=peaked, high=spread)
+                    for di, w in enumerate(aw):
+                        w_np = w.cpu().numpy()
+                        # Entropy-like spread: 1/len means uniform
+                        L = w_np.shape[-1]
+                        spread = float((w_np * (w_np + 1e-9).log()).sum(axis=-1).mean()) / max(float(np.log(L)), 1e-9)
+                        top3_frac = float(np.sort(w_np, axis=-1)[:, -3:].sum(axis=-1).mean())
+                        logging.info(f"[Monitor] attn_w d{di}: top3={top3_frac:.3f} spread={spread:.3f}")
+
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
@@ -487,7 +505,7 @@ class PCVRHyFormerRankingTrainer:
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=True)
 
         self.dense_optimizer.step()
         if self.sparse_optimizer is not None:

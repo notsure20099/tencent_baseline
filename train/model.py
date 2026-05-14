@@ -490,6 +490,11 @@ class MultiSeqQueryGenerator(nn.Module):
         # LayerNorm on global_info to prevent gradient explosion from large-dim concat
         self.global_info_norm = nn.LayerNorm(global_info_dim)
 
+        # ── Attention Pooling: learnable per-domain query vector ──
+        # Replaces MeanPool — each domain learns WHICH tokens matter for Q gen
+        self.attn_query = nn.Parameter(torch.randn(num_sequences, d_model) * 0.02)
+        nn.init.uniform_(self.attn_query, -0.1, 0.1)
+
         # Each sequence has N independent FFNs
         self.query_ffns_per_seq = nn.ModuleList([
             nn.ModuleList([
@@ -530,13 +535,16 @@ class MultiSeqQueryGenerator(nn.Module):
             ns_flat = torch.cat([ns_flat, dense_flat], dim=-1)
 
         q_tokens_list = []
+        self._last_attn_weights = []  # (B, L_i) per domain, for monitoring
         for i in range(self.num_sequences):
-            # MeanPool(Seq_i)
-            valid_mask = ~seq_padding_masks[i]  # True = valid
-            valid_mask_expanded = valid_mask.unsqueeze(-1).float()  # (B, L_i, 1)
-            seq_sum = (seq_tokens_list[i] * valid_mask_expanded).sum(dim=1)  # (B, D)
-            seq_count = valid_mask_expanded.sum(dim=1).clamp(min=1)  # (B, 1)
-            seq_pooled = seq_sum / seq_count  # (B, D)
+            # ── Attention Pooling ──
+            tokens_i = seq_tokens_list[i]                          # (B, L_i, D)
+            valid = ~seq_padding_masks[i]                           # (B, L_i)
+            scores = tokens_i @ self.attn_query[i]                  # (B, L_i)
+            scores = scores.masked_fill(~valid, float('-inf'))
+            weights = torch.softmax(scores, dim=-1)                 # (B, L_i)
+            seq_pooled = (tokens_i * weights.unsqueeze(-1)).sum(dim=1)  # (B, D)
+            self._last_attn_weights.append(weights.detach())
 
             # GlobalInfo_i = Concat(NS_flat, seq_pooled_i)
             global_info = torch.cat([ns_flat, seq_pooled], dim=-1)  # (B, (M+1)*D)

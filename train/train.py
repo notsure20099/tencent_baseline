@@ -330,18 +330,27 @@ def main() -> None:
         "use_time_bias": args.use_time_bias,
     }
 
+    # ── Speed optimisations ──
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision('high')
+
     model = PCVRHyFormer(**model_args).to(args.device)
     model = torch.compile(model)
 
-    # Log model sizing info.
+    # ── Model & dataset monitoring ──
     num_sequences = len(pcvr_dataset.seq_domains)
     num_ns = model.num_ns
     T = args.num_queries * num_sequences + num_ns
-    logging.info(f"PCVRHyFormer model created: num_ns={num_ns}, T={T}, d_model={args.d_model}, rank_mixer_mode={args.rank_mixer_mode}")
-    logging.info(f"User NS groups: {user_ns_groups}")
-    logging.info(f"Item NS groups: {item_ns_groups}")
-    total_params = sum(p.numel() for p in model.parameters())
-    logging.info(f"Total parameters: {total_params:,}")
+    dense_params = sum(p.numel() for p in model.parameters() if p.requires_grad and p.dim() >= 2)
+    sparse_params = sum(p.numel() for p in model.parameters() if p.requires_grad and p.dim() < 2)
+    total_params = dense_params + sparse_params
+
+    logging.info(f"[Monitor] Model: d={args.d_model} heads={args.num_heads} blocks={args.num_hyformer_blocks} Nq={args.num_queries} T={T}")
+    logging.info(f"[Monitor] Model: total={total_params:,} dense={dense_params:,} sparse={sparse_params:,}")
+    logging.info(f"[Monitor] Data: rows={pcvr_dataset.num_rows} batch={args.batch_size} workers={args.num_workers}")
+    logging.info(f"[Monitor] Data: seq_lens={args.seq_max_lens}")
+    logging.info(f"[Monitor] AttnPool: query_dim={model.q_gen.attn_query.shape}")
 
     # ---- Training ----
     early_stopping = EarlyStopping(
