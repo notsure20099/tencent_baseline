@@ -336,7 +336,8 @@ def main() -> None:
     torch.set_float32_matmul_precision('high')
 
     model = PCVRHyFormer(**model_args).to(args.device)
-    model = torch.compile(model)
+    # torch.compile disabled due to hang with attention pooling dynamic shapes
+    # model = torch.compile(model)
 
     # ── Model & dataset monitoring ──
     num_sequences = len(pcvr_dataset.seq_domains)
