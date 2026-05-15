@@ -552,6 +552,47 @@ class PCVRHyFormerRankingTrainer:
         else:
             logloss = float('inf')
 
+        # ── Monitoring: structural health indicators ──
+        if hasattr(self.model, 'blocks') and len(self.model.blocks) > 0:
+            block0 = self.model.blocks[0]
+            mixer = block0.mixer
+            mixer_mode = mixer.mode if hasattr(mixer, 'mode') else 'unknown'
+            T_val = mixer.T if hasattr(mixer, 'T') else 0
+            D_val = mixer.D if hasattr(mixer, 'D') else 0
+            full_check = 'OK' if (mixer_mode == 'full' and D_val % T_val == 0) else 'DEGRADED'
+            logging.info(
+                f"[Monitor] RankMixer mode={mixer_mode} T={T_val} d_model={D_val} "
+                f"{D_val}%{T_val}={D_val % T_val if T_val else '?'} ({full_check})")
+
+            if hasattr(block0, 'cross_attns'):
+                for ca_idx, ca in enumerate(block0.cross_attns):
+                    if hasattr(ca, 'use_time_bias') and ca.use_time_bias:
+                        tb = ca.temporal_bias.weight.detach()
+                        tb_norm = float(tb.norm())
+                        tb_mean = float(tb[1:].mean())
+                        domain_map = {0: 'seq_a', 1: 'seq_b', 2: 'seq_c', 3: 'seq_d'}
+                        domain = domain_map.get(ca_idx, f'ca_{ca_idx}')
+                        logging.info(
+                            f"[Monitor] time_bias {domain} "
+                            f"norm={tb_norm:.3f} mean={tb_mean:+.3f}")
+
+            if len(probs) > 0 and len(np.unique(labels_np)) >= 2:
+                pos_mask = labels_np == 1
+                neg_mask = labels_np == 0
+                pos_mean = float(probs[pos_mask].mean())
+                pos_std = float(probs[pos_mask].std())
+                neg_mean = float(probs[neg_mask].mean())
+                neg_std = float(probs[neg_mask].std())
+                sep = (pos_mean - neg_mean) / max((pos_std + neg_std) / 2, 1e-9)
+                logging.info(
+                    f"[Monitor] pred-prob pos={pos_mean:.3f}+-{pos_std:.3f} "
+                    f"neg={neg_mean:.3f}+-{neg_std:.3f} sep={sep:.2f}")
+
+        # NS token count (Exp37 specific)
+        raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+        if hasattr(raw, 'num_ns'):
+            logging.info(f"[Monitor] NS tokens: user_ns={raw.num_ns}")
+
         return auc, logloss
 
     def _evaluate_step(
