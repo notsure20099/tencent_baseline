@@ -237,46 +237,35 @@ def main():
     print(f"Scan time: {scan_time:.1f}s")
     print()
 
-    # M0: Raw data dump — all features with full stats (for offline comparison)
-    print("─ M0: RAW FEATURE RECORD (copy to compare with test output) ─")
-    print("FEATURE_TYPE FID AUC NZ_RATE MEAN STD")
-    for key in sorted(int_summary.keys()):
-        s = int_summary[key]
-        print(f"FEAT {s['type']} {s['fid']} {s['auc']:.4f} {s['nz_rate']:.4f} {s['mean']:.2f} {s['std']:.2f}")
-    for d in dense_summary:
-        # find which fid this dim belongs to
-        fid = "?"
-        offset = 0
-        for _fid, _, length in user_dense_entries:
-            if offset <= d["dim"] < offset + length:
-                fid = str(_fid)
-                break
-            offset += length
-        print(f"DENSE user_dense {fid} d{d['dim']} _ {d['nz_rate']:.4f} {d['mean']:.6f} {d['std']:.6f}")
+    # ── Helper: pack items into multi-item lines (N items per line) ──
+    def _pack(items, per_line=5):
+        for i in range(0, len(items), per_line):
+            yield "  ".join(str(x) for x in items[i:i + per_line])
+
+    # M0: Int feature distribution + AUC records (for offline diff with test M0)
+    print("─ M0: INT FEATURE DISTRIBUTION + AUC (5 per line, copy to diff) ─")
+    print("COL: FEATURE_TYPE FID AUC NZ_RATE MEAN STD | ...")
+    feats = [f"{s['type']} {s['fid']} {s['auc']:.4f} {s['nz_rate']:.4f} {s['mean']:.2f} {s['std']:.2f}"
+             for key in sorted(int_summary.keys()) for s in [int_summary[key]]]
+    for line in _pack(feats, 5):
+        print(line)
     print()
 
-    # M1: Schema
-    print("─ M1: INT FEATURE SCHEMA ─")
-    print(f"{'FID':>5} {'Type':>12} {'Vocab':>8} {'Dim':>5}")
-    print("-" * 35)
-    for fid, offset, length in user_int_entries:
-        vs = max(user_int_vocab[offset:offset + length])
-        print(f"{fid:>5} {'user_int':>12} {vs:>8} {length:>5}")
-    for fid, offset, length in item_int_entries:
-        vs = max(item_int_vocab[offset:offset + length])
-        print(f"{fid:>5} {'item_int':>12} {vs:>8} {length:>5}")
-    print(f"Dense: {n_dense} dims, fids: {', '.join(str(f) for f, _, _ in user_dense_entries)}")
+    # M1: Schema summary
+    print("─ M1: SCHEMA SUMMARY ─")
+    nz_above_50 = sum(1 for s in int_summary.values() if s['nz_rate'] > 0.5)
+    nz_above_10 = sum(1 for s in int_summary.values() if s['nz_rate'] > 0.1)
+    nz_below_1 = sum(1 for s in int_summary.values() if s['nz_rate'] < 0.01)
+    print(f"  user_int: {n_user} fids  item_int: {n_item} fids  nz>50%: {nz_above_50}  nz>10%: {nz_above_10}  nz<1%: {nz_below_1}")
+    print(f"  dense: {n_dense} dims from fids {', '.join(str(f) for f, _, _ in user_dense_entries)}")
     print()
 
-    # M2: AUC ranking
-    print("─ M2: INT FEATURE AUC ─")
-    n_show = min(len(auc_results), 70)
-    print(f"{'Rank':>4} {'Key':>24} {'AUC':>8} {'NZ%':>7} {'Mean':>10} {'Std':>10}")
-    print("-" * 70)
-    for i, (key, auc_val) in enumerate(auc_results[:n_show]):
-        info = int_summary.get(key, {})
-        print(f"{i+1:>4} {key:>24} {auc_val:>8.4f} {info.get('nz_rate', 0):>7.1%} "
-              f"{info.get('mean', 0):>10.1f} {info.get('std', 0):>10.1f}")
+    # M2: AUC ranking (packed)
+    print("─ M2: INT FEATURE AUC (key auc|nz%, 5 per line) ─")
+    auc_items = [f"{k} {v:.4f}|{int_summary.get(k, {}).get('nz_rate', 0):.1%}"
+                 for k, v in auc_results]
+    for line in _pack(auc_items, 5):
+        print(line)
     print()
 
     # M3: Classification
@@ -284,48 +273,37 @@ def main():
     strong = [(k, v) for k, v in auc_results if v > 0.53]
     medium = [(k, v) for k, v in auc_results if 0.51 < v <= 0.53]
     weak = [(k, v) for k, v in auc_results if v <= 0.51]
-    print(f"S (AUC>0.53): {len(strong)}")
-    for k, v in strong:
-        print(f"  {k} AUC={v:.4f} nz={int_summary.get(k, {}).get('nz_rate', 0):.1%}")
-    if not strong:
-        print("  (none)")
-    print(f"A (AUC 0.51-0.53): {len(medium)}")
-    for k, v in medium[:10]:
-        print(f"  {k} AUC={v:.4f}")
-    if len(medium) > 10:
-        print(f"  ... and {len(medium) - 10} more")
+    print(f"S (AUC>0.53): {len(strong)} {', '.join(k for k,_ in strong) if strong else '(none)'}")
+    print(f"A (AUC 0.51-0.53): {len(medium)} {', '.join(k for k,_ in medium) if medium else '(none)'}")
     print(f"B (AUC<=0.51): {len(weak)}")
     print()
 
-    # M4: Dense dims
-    print("─ M4: DENSE DIM STATS (top 40 by nz_rate) ─")
+    # M4: Dense dims (packed)
+    print("─ M4: DENSE DIM STATS ─")
     dense_sorted = sorted(dense_summary, key=lambda x: -x["nz_rate"])[:40]
-    print(f"{'Rank':>4} {'Dim':>6} {'NZ%':>8} {'Mean':>14} {'Std':>14}")
-    print("-" * 55)
-    for i, d in enumerate(dense_sorted):
-        print(f"{i+1:>4} {d['dim']:>6} {d['nz_rate']:>7.1%} {d['mean']:>14.6f} {d['std']:>14.6f}")
-    # Also print dims by mean value (catch large-value outliers)
-    print(f"\nTop 20 dims by |mean|:")
+    items = [f"d{d['dim']}:{d['nz_rate']:.1%}|{d['mean']:.4f}|{d['std']:.4f}"
+             for d in dense_sorted]
+    print(f"Top 40 by nz_rate: {'  '.join(items[:20])}")
+    if len(items) > 20:
+        print(f"  {'  '.join(items[20:])}")
     dense_by_mean = sorted(dense_summary, key=lambda x: -abs(x["mean"]))[:20]
-    for i, d in enumerate(dense_by_mean):
-        print(f"  dim={d['dim']:>6}  mean={d['mean']:>14.6f}  std={d['std']:>14.6f}  nz={d['nz_rate']:.1%}")
+    items2 = [f"d{d['dim']}:{d['mean']:.6f}|{d['nz_rate']:.1%}" for d in dense_by_mean]
+    print(f"Top 20 by |mean|: {'  '.join(items2)}")
     print()
 
     # M5: I2 spotlight
     print("─ M5: I2 SPOTLIGHT (item fids 5,6,7,8,12) ─")
+    i2_parts = []
     for fid_s in ["5", "6", "7", "8", "12"]:
-        key = f"item_int_{fid_s}"
-        s = int_summary.get(key, {})
-        print(f"  fid={fid_s}: AUC={s.get('auc', '?'):>7s} nz={s.get('nz_rate', 0):.1%} "
-              f"mean={s.get('mean', 0):.1f} std={s.get('std', 0):.1f}")
+        s = int_summary.get(f"item_int_{fid_s}", {})
+        i2_parts.append(f"{fid_s}:AUC={s.get('auc', '?'):>7s}|nz={s.get('nz_rate', 0):.1%}|m={s.get('mean', 0):.1f}|s={s.get('std', 0):.1f}")
+    print(f"  {'  '.join(i2_parts)}")
     print()
 
     # Summary
     print("─ SUMMARY ─")
-    print(f"Features with AUC>0.5: {sum(1 for _,v in auc_results if v>0.5)}/{len(auc_results)}")
     if auc_results:
-        print(f"Max AUC: {auc_results[0][1]:.4f} ({auc_results[0][0]})")
-        print(f"Median AUC: {auc_results[len(auc_results)//2][1]:.4f}")
+        print(f"AUC>0.5: {sum(1 for _,v in auc_results if v>0.5)}/{len(auc_results)}  Max: {auc_results[0][1]:.4f}({auc_results[0][0]})  Median: {auc_results[len(auc_results)//2][1]:.4f}")
     print("=" * 72)
 
     total_time = time.time() - t0

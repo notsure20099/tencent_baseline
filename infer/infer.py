@@ -149,53 +149,49 @@ def main():
     print(f"Rows: {test_rows:,}  user_int: {len(user_int_entries)}  item_int: {len(item_int_entries)}  dense: {n_dense}")
     print()
 
-    # M0: Raw data dump — same format as train M0 for offline diff
-    print("─ M0: RAW FEATURE RECORD (copy to diff with train M0 output) ─")
-    print("FEATURE_TYPE FID AUC NZ_RATE MEAN STD")
+    # ── Helper ──
+    def _pack(items, per_line=5):
+        for i in range(0, len(items), per_line):
+            yield "  ".join(str(x) for x in items[i:i + per_line])
+
+    # M0: Int feature distribution records (for offline diff with train M0)
+    print("─ M0: INT FEATURE DISTRIBUTION (5 per line, copy to diff) ─")
+    print("COL: FEATURE_TYPE FID NZ_RATE MEAN STD | ...")
+    feats = []
     for key in sorted(int_dists.keys()):
         d = int_dists[key]
         parts = key.split("_", 2)
         ftype = f"{parts[0]}_{parts[1]}"
         fid = parts[2] if len(parts) > 2 else "?"
-        print(f"FEAT {ftype} {fid} _ {d.nz_rate:.4f} {d.mean:.2f} {d.std:.2f}")
-    offset = 0
-    for _fid, _, length in user_dense_entries:
-        for l in range(length):
-            d_idx = offset + l
-            if d_idx < len(dense_dists):
-                dd = dense_dists[d_idx]
-                if dd.total > 0:
-                    print(f"DENSE user_dense {_fid} d{d_idx} _ {dd.nz_rate:.4f} {dd.mean:.6f} {dd.std:.6f}")
-        offset += length
+        feats.append(f"{ftype} {fid} {d.nz_rate:.4f} {d.mean:.2f} {d.std:.2f}")
+    for line in _pack(feats, 5):
+        print(line)
     print()
 
-    # M1: Schema overview
-    print("─ M1: SCHEMA OVERVIEW ─")
-    print(f"{'FID':>5} {'Type':>12} {'Dim':>5} {'NZ%':>7} {'Mean':>14} {'Std':>14}")
-    print("-" * 65)
-    for fid, offset, length in user_int_entries:
-        d = int_dists[f"user_int_{fid}"]
-        print(f"{fid:>5} {'user_int':>12} {length:>5} {d.nz_rate:>7.1%} {d.mean:>14.2f} {d.std:>14.2f}")
-    for fid, offset, length in item_int_entries:
-        d = int_dists[f"item_int_{fid}"]
-        print(f"{fid:>5} {'item_int':>12} {length:>5} {d.nz_rate:>7.1%} {d.mean:>14.2f} {d.std:>14.2f}")
-    print(f"Dense: {n_dense} dims, fids: {', '.join(str(f) for f, _, _ in user_dense_entries)}")
-    print()
+    # M1: Schema summary
+    print("─ M1: SCHEMA SUMMARY ─")
+    nz_above_50 = sum(1 for d in int_dists.values() if d.nz_rate > 0.5)
+    nz_above_10 = sum(1 for d in int_dists.values() if d.nz_rate > 0.1)
+    nz_below_1 = sum(1 for d in int_dists.values() if d.nz_rate < 0.01)
+    print(f"  user_int: {len(user_int_entries)} fids  item_int: {len(item_int_entries)} fids  nz>50%: {nz_above_50}  nz>10%: {nz_above_10}  nz<1%: {nz_below_1}")
+    print(f"  dense: {n_dense} dims from fids {', '.join(str(f) for f, _, _ in user_dense_entries)}")
 
     # M2: I2 item group focus
     print("─ M2: I2 GROUP (item fids 5,6,7,8,12) ─")
+    i2_parts = []
     for fid_s in ["5", "6", "7", "8", "12"]:
         key = f"item_int_{fid_s}"
         d = int_dists.get(key)
         if d is not None:
-            print(f"  fid={fid_s}: nz={d.nz_rate:.1%} mean={d.mean:.1f} std={d.std:.1f}")
+            i2_parts.append(f"{fid_s}:nz={d.nz_rate:.1%}|m={d.mean:.1f}|s={d.std:.1f}")
         else:
-            print(f"  fid={fid_s}: NOT IN TEST SCHEMA")
+            i2_parts.append(f"{fid_s}:MISSING")
+    print(f"  {'  '.join(i2_parts)}")
     print()
 
-    # M3: Dense dimension stats
+    # M3: Dense dimension stats (packed)
     if n_dense > 0:
-        print("─ M3: DENSE DIM STATS (top 40 by non-zero rate) ─")
+        print("─ M3: DENSE DIM STATS ─")
         dense_info = []
         for d in range(n_dense):
             dd = dense_dists[d]
@@ -209,22 +205,19 @@ def main():
                     off += length
                 dense_info.append((d, fid, dd.nz_rate, dd.mean, dd.std))
         dense_sorted = sorted(dense_info, key=lambda x: -x[2])[:40]
-        print(f"{'Rank':>4} {'Dim':>6} {'FID':>5} {'NZ%':>8} {'Mean':>14} {'Std':>14}")
-        print("-" * 60)
-        for i, (d, fid, nz, mean, std) in enumerate(dense_sorted):
-            print(f"{i+1:>4} {d:>6} {fid:>5} {nz:>7.1%} {mean:>14.6f} {std:>14.6f}")
-        # Top by |mean|
-        print(f"\nTop 20 dims by |mean|:")
+        items = [f"d{d}({fid}){nz:.1%}|{mean:.4f}" for d, fid, nz, mean, _ in dense_sorted]
+        print(f"Top 40 by nz: {'  '.join(items[:20])}")
+        if len(items) > 20:
+            print(f"  {'  '.join(items[20:])}")
         dense_by_mean = sorted(dense_info, key=lambda x: -abs(x[3]))[:20]
-        for d, fid, nz, mean, std in dense_by_mean:
-            print(f"  dim={d:>6} fid={fid:>4} mean={mean:>14.6f} std={std:>14.6f} nz={nz:.1%}")
+        items2 = [f"d{d}({fid}){mean:.6f}|{nz:.1%}" for d, fid, nz, mean, _ in dense_by_mean]
+        print(f"Top 20 by |mean|: {'  '.join(items2)}")
         print()
 
     # Summary
     print("─ SUMMARY ─")
     zero_nz = sum(1 for d in int_dists.values() if d.nz_rate < 0.001)
-    print(f"Features with nz_rate < 0.1%: {zero_nz}/{len(int_dists)}")
-    print(f"I2 fids present: {sum(1 for fid in ['5','6','7','8','12'] if f'item_int_{fid}' in int_dists)}/5")
+    print(f"Features nz<0.1%: {zero_nz}/{len(int_dists)}  I2 fids present: {sum(1 for fid in ['5','6','7','8','12'] if f'item_int_{fid}' in int_dists)}/5")
     print("=" * 72)
 
 
