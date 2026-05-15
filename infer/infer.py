@@ -745,170 +745,34 @@ def _batch_to_model_input(
 
 
 def main() -> None:
-    # ---- Read environment variables ----
+    """feature_audit: train↔test feature distribution comparison.
+
+    No model loading, no inference. Pure data exploration: reads train-side
+    ``feature_stats.json``, streams through test parquet, and prints a
+    schema diff + distribution drift report.
+    """
     model_dir = os.environ.get('MODEL_OUTPUT_PATH')
     data_dir = os.environ.get('EVAL_DATA_PATH')
-    result_dir = os.environ.get('EVAL_RESULT_PATH')
+    if not model_dir or not data_dir:
+        logging.error("MODEL_OUTPUT_PATH and EVAL_DATA_PATH must be set.")
+        return
 
-    os.makedirs(result_dir, exist_ok=True)
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    # ---- Schema: prefer the one from model_dir (to exactly match training);
-    #      fall back to the one in data_dir if missing. ----
+    # Schema: prefer model_dir (train schema), fall back to data_dir
     schema_path = os.path.join(model_dir, 'schema.json')
     if not os.path.exists(schema_path):
         schema_path = os.path.join(data_dir, 'schema.json')
     logging.info(f"Using schema: {schema_path}")
 
-    # ---- Load train_config.json (single source of truth for all hyperparams) ----
     train_config = load_train_config(model_dir)
 
-    # ---- Parse seq_max_lens ----
     sml_str = train_config.get('seq_max_lens', _FALLBACK_SEQ_MAX_LENS)
     seq_max_lens = _parse_seq_max_lens(sml_str)
     logging.info(f"seq_max_lens: {seq_max_lens}")
 
-    # ---- Data loading: reuse batch_size / num_workers from training config ----
-    # Allow overriding batch_size via EVAL_BATCH_SIZE env var (useful when
-    # GPU memory is tight, e.g. shared GPU with other processes).
-    eval_batch_size = os.environ.get('EVAL_BATCH_SIZE')
-    if eval_batch_size is not None:
-        batch_size = int(eval_batch_size)
-        logging.info(f"Using EVAL_BATCH_SIZE={batch_size} (overriding training config)")
-    else:
-        batch_size = int(train_config.get('batch_size', _FALLBACK_BATCH_SIZE))
-    num_workers = int(train_config.get('num_workers', _FALLBACK_NUM_WORKERS))
+    batch_size = int(os.environ.get('EVAL_BATCH_SIZE',
+                     train_config.get('batch_size', _FALLBACK_BATCH_SIZE)))
 
-    test_dataset = PCVRParquetDataset(
-        parquet_path=data_dir,
-        schema_path=schema_path,
-        batch_size=batch_size,
-        seq_max_lens=seq_max_lens,
-        shuffle=False,
-        buffer_batches=0,
-        is_training=False,
-    )
-    total_test_samples = test_dataset.num_rows
-    logging.info(f"Total test samples: {total_test_samples}")
-
-    # ---- Build model: every structural hyperparameter is resolved from train_config ----
-    model_cfg = resolve_model_cfg(train_config)
-
-    # ns_groups_json also comes from training config (e.g. run.sh may have
-    # passed an empty string to disable it). When trainer.py has copied the
-    # JSON into the ckpt dir, train_config records just the basename, so try
-    # resolving against ``model_dir`` first before honoring the raw (possibly
-    # absolute) path as a fallback.
-    ns_groups_json = train_config.get('ns_groups_json', None)
-    if ns_groups_json:
-        local_candidate = os.path.join(model_dir, os.path.basename(ns_groups_json))
-        if os.path.exists(local_candidate):
-            ns_groups_json = local_candidate
-
-    _log_gpu_memory('before_build')
-    model = build_model(
-        test_dataset,
-        model_cfg=model_cfg,
-        ns_groups_json=ns_groups_json,
-        device=device,
-    )
-    _log_gpu_memory('after_build')
-
-    # ---- Strictly load weights ----
-    ckpt_path = get_ckpt_path()
-    if ckpt_path is None:
-        raise FileNotFoundError(
-            f"No *.pt file found under MODEL_OUTPUT_PATH={model_dir!r}. "
-            f"The directory contains: {os.listdir(model_dir) if model_dir and os.path.isdir(model_dir) else 'N/A'}. "
-            "This typically means the training job wrote only the sidecar "
-            "files (schema.json / train_config.json) for this step but did "
-            "not persist model.pt — a symptom of a race between "
-            "_remove_old_best_dirs and EarlyStopping.save_checkpoint."
-        )
-    logging.info(f"Loading checkpoint from {ckpt_path}")
-    load_model_state_strict(model, ckpt_path, device)
-    model.eval()
-    logging.info("Model loaded successfully")
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        logging.info("Cleared CUDA cache before inference")
-
-    _log_gpu_memory('before_inference')
-
-    # ── Data diagnostic: train↔test feature distribution comparison ──
-    if os.environ.get('DIAGNOSE_DATA', '').lower() in ('true', '1', 'yes'):
-        _run_data_diagnose(model_dir, data_dir, schema_path, seq_max_lens, batch_size)
-        return
-
-    # ── Q4 diagnostic: Content vs Time awareness ──
-    if os.environ.get('Q4_DIAGNOSE', '').lower() in ('true', '1', 'yes'):
-        # Q4 needs labels → use training data path (TRAIN_DATA_PATH env var
-        # or fallback: strip the task-id suffix from EVAL_DATA_PATH)
-        q4_data_dir = os.environ.get('TRAIN_DATA_PATH', '')
-        if not q4_data_dir:
-            # fallback: try replacing the task dir suffix in EVAL_DATA_PATH
-            # e.g. .../84887/test_data → .../train_data
-            q4_data_dir = data_dir.replace('/test/', '/train/').replace('/eval/', '/train/')
-        if not q4_data_dir or not os.path.isdir(q4_data_dir):
-            q4_data_dir = data_dir
-            logging.warning("Q4: TRAIN_DATA_PATH not set, using EVAL_DATA_PATH (labels may be all-zero!)")
-
-        q4_dataset = PCVRParquetDataset(
-            parquet_path=q4_data_dir,
-            schema_path=schema_path,
-            batch_size=batch_size,
-            seq_max_lens=seq_max_lens,
-            shuffle=True,
-            buffer_batches=20,
-            is_training=True,  # ← read real labels
-        )
-        logging.info(f"Q4: using data from {q4_data_dir} ({q4_dataset.num_rows} rows, is_training=True)")
-        _run_q4_diagnose(model, q4_dataset, device)
-        return
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=None,
-        num_workers=num_workers,
-        prefetch_factor=2,
-        pin_memory=torch.cuda.is_available(),
-    )
-
-    all_probs = []
-    all_user_ids = []
-    logging.info("Starting inference...")
-
-    try:
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(test_loader):
-                model_input = _batch_to_model_input(batch, device)
-                user_ids = batch.get('user_id', [])
-
-                logits, _ = model.predict(model_input)
-                logits = logits.squeeze(-1)
-                probs = torch.sigmoid(logits).cpu().numpy()
-                all_probs.extend(probs.tolist())
-                all_user_ids.extend(user_ids)
-
-                if (batch_idx + 1) % 100 == 0:
-                    logging.info(f"  Processed {(batch_idx + 1) * batch_size} samples")
-    except RuntimeError as e:
-        _log_gpu_memory(f'OOM_at_batch_{batch_idx}')
-        raise e
-
-    logging.info(f"Inference complete: {len(all_probs)} predictions")
-
-    predictions = {
-        "predictions": dict(zip(all_user_ids, all_probs)),
-    }
-
-    # ---- Save predictions.json ----
-    output_path = os.path.join(result_dir, 'predictions.json')
-    with open(output_path, 'w') as f:
-        json.dump(predictions, f)
-    logging.info(f"Saved {len(all_probs)} predictions to {output_path}")
+    _run_data_diagnose(model_dir, data_dir, schema_path, seq_max_lens, batch_size)
 
 
 if __name__ == "__main__":
