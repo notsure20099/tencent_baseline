@@ -110,7 +110,7 @@ def main():
                         help="Training data directory")
     parser.add_argument("--max_batches", type=int, default=0,
                         help="Limit batches (0=full). Use 1 for quick test.")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     if not args.data_dir:
         log.error("--data_dir not set and TRAIN_DATA_PATH env var is not set. Abort.")
