@@ -443,7 +443,7 @@ def main() -> None:
         test_dataset,
         batch_size=None,
         num_workers=num_workers,
-        prefetch_factor=2,
+        prefetch_factor=2 if num_workers > 0 else None,
         pin_memory=torch.cuda.is_available(),
     )
 
