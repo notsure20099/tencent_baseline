@@ -1,33 +1,18 @@
-"""PCVRHyFormer inference script (uploaded by the contestant into the
-evaluation container).
+"""feature_audit: train↔test feature distribution comparison.
 
-Model construction mirrors ``train.py``: we rebuild the model from
-``schema.json`` + ``ns_groups.json`` + ``train_config.json``. All model
-hyperparameters are resolved first from the ckpt directory's
-``train_config.json`` (written by ``trainer.py`` when saving a checkpoint),
-falling back to ``_FALLBACK_MODEL_CFG`` below (which must stay consistent
-with the CLI defaults in ``train.py``).
-
-Only the Parquet data format is supported.
+No model loading, no inference. Pure data exploration: reads train-side
+``feature_stats.json``, streams through test parquet, and prints a
+schema diff + distribution drift report.
 
 Environment variables:
-    MODEL_OUTPUT_PATH  Checkpoint directory (points at the ``global_step``
-                       sub-directory containing ``model.pt`` / ``train_config.json``).
+    MODEL_OUTPUT_PATH  Checkpoint directory (contains schema.json + feature_stats.json).
     EVAL_DATA_PATH     Test data directory (*.parquet + schema.json).
-    EVAL_RESULT_PATH   Directory for the generated ``predictions.json``.
 """
 
 import os
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
-
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-
-from dataset import FeatureSchema, PCVRParquetDataset, NUM_TIME_BUCKETS
-from model import PCVRHyFormer, ModelInput
+from typing import Any, Dict
 
 
 logging.basicConfig(
@@ -35,107 +20,11 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 
-
-def _log_gpu_memory(tag: str = '') -> None:
-    """Log CUDA memory usage and per-process GPU utilization.
-
-    Emits ``nvidia-smi`` output (when available) and PyTorch's allocator
-    summary so that OOM diagnostics are self-contained in the log.
-    """
-    if not torch.cuda.is_available():
-        logging.info(f"[GPU:{tag}] CUDA not available")
-        return
-
-    free_bytes, total_bytes = torch.cuda.mem_get_info()
-    allocated = torch.cuda.memory_allocated()
-    reserved = torch.cuda.memory_reserved()
-    used_pct = 100.0 * (total_bytes - free_bytes) / total_bytes
-
-    logging.info(
-        f"[GPU:{tag}] total={total_bytes / 1024**3:.2f} GiB  "
-        f"free={free_bytes / 1024**3:.2f} GiB  "
-        f"used={used_pct:.1f}%  "
-        f"allocated={allocated / 1024**3:.2f} GiB  "
-        f"reserved={reserved / 1024**3:.2f} GiB"
-    )
-
-    try:
-        import subprocess
-        result = subprocess.run(
-            ['nvidia-smi', '--query-compute-apps=pid,used_memory',
-             '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            logging.info(f"[GPU:{tag}] nvidia-smi processes:\n{result.stdout.strip()}")
-    except Exception:
-        pass
-
-
-# Fallback values used only when ``train_config.json`` is missing from the
-# ckpt directory.
-#
-# These MUST match the argparse defaults in ``train.py``; otherwise once the
-# fallback path is actually taken the built model will shape-mismatch the
-# saved state_dict.
-#
-# Special note on ``num_time_buckets``: this value is strictly determined by
-# ``dataset.BUCKET_BOUNDARIES`` and is NOT an independent hyperparameter.
-# When the feature is enabled we therefore use the constant exposed by the
-# dataset module; ``0`` means disabled.
-_FALLBACK_MODEL_CFG = {
-    'd_model': 64,
-    'emb_dim': 64,
-    'num_queries': 1,
-    'num_hyformer_blocks': 2,
-    'num_heads': 4,
-    'seq_encoder_type': 'transformer',
-    'hidden_mult': 4,
-    'dropout_rate': 0.01,
-    'seq_top_k': 50,
-    'seq_causal': False,
-    'action_num': 1,
-    'num_time_buckets': NUM_TIME_BUCKETS,
-    'rank_mixer_mode': 'full',
-    'use_rope': False,
-    'rope_base': 10000.0,
-    'emb_skip_threshold': 0,
-    'seq_id_threshold': 10000,
-    'ns_tokenizer_type': 'rankmixer',
-    'user_ns_tokens': 0,
-    'item_ns_tokens': 0,
-    'use_item_bridge': False,
-    'dense_token_groups': 1,
-    'dense_aware_qgen': False,
-    'use_time_bias': False,
-}
-
 _FALLBACK_SEQ_MAX_LENS = 'seq_a:256,seq_b:256,seq_c:512,seq_d:512'
 _FALLBACK_BATCH_SIZE = 256
-_FALLBACK_NUM_WORKERS = 16
-
-
-# Hyperparameter keys used to build the model. Everything else in
-# ``train_config.json`` is ignored when constructing ``PCVRHyFormer``.
-_MODEL_CFG_KEYS = list(_FALLBACK_MODEL_CFG.keys())
-
-
-def build_feature_specs(
-    schema: FeatureSchema,
-    per_position_vocab_sizes: List[int],
-) -> List[Tuple[int, int, int]]:
-    """Build ``feature_specs = [(vocab_size, offset, length), ...]`` in the
-    order of ``schema.entries``.
-    """
-    specs: List[Tuple[int, int, int]] = []
-    for fid, offset, length in schema.entries:
-        vs = max(per_position_vocab_sizes[offset:offset + length])
-        specs.append((vs, offset, length))
-    return specs
 
 
 def _parse_seq_max_lens(sml_str: str) -> Dict[str, int]:
-    """Parse a string like ``'seq_a:256,seq_b:256,...'`` into a dict."""
     seq_max_lens: Dict[str, int] = {}
     for pair in sml_str.split(','):
         k, v = pair.split(':')
@@ -144,280 +33,14 @@ def _parse_seq_max_lens(sml_str: str) -> Dict[str, int]:
 
 
 def load_train_config(model_dir: str) -> Dict[str, Any]:
-    """Load ``train_config.json`` from the ckpt directory.
-
-    Returns an empty dict (which triggers fallback resolution) if the file is
-    not present.
-    """
     train_config_path = os.path.join(model_dir, 'train_config.json')
     if os.path.exists(train_config_path):
         with open(train_config_path, 'r') as f:
             cfg = json.load(f)
         logging.info(f"Loaded train_config from {train_config_path}")
         return cfg
-    logging.warning(
-        f"train_config.json not found in {model_dir}, "
-        f"falling back to hardcoded defaults. "
-        f"Shape mismatch may occur if training used non-default hyperparameters.")
+    logging.info(f"train_config.json not found in {model_dir}, using fallback defaults")
     return {}
-
-
-def resolve_model_cfg(train_config: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract model hyperparameters from ``train_config``; missing keys fall
-    back to ``_FALLBACK_MODEL_CFG``.
-
-    Special handling for ``num_time_buckets``: it is not exposed on the CLI
-    as an independent hyperparameter; the bucket count is uniquely determined
-    by the length of ``dataset.BUCKET_BOUNDARIES``. Resolution order:
-
-      1) ``train_config`` contains ``num_time_buckets`` directly (legacy ckpt)
-         -> use that value;
-      2) ``train_config`` contains ``use_time_buckets`` (new-style training)
-         -> derive as ``NUM_TIME_BUCKETS`` or ``0``;
-      3) neither is present -> fall back to ``_FALLBACK_MODEL_CFG[...]``.
-    """
-    cfg: Dict[str, Any] = {}
-    for key in _MODEL_CFG_KEYS:
-        if key == 'num_time_buckets':
-            if 'num_time_buckets' in train_config:
-                cfg[key] = train_config['num_time_buckets']
-            elif 'use_time_buckets' in train_config:
-                cfg[key] = NUM_TIME_BUCKETS if train_config['use_time_buckets'] else 0
-            else:
-                cfg[key] = _FALLBACK_MODEL_CFG[key]
-                logging.warning(
-                    f"train_config missing both 'num_time_buckets' and 'use_time_buckets', "
-                    f"using fallback = {cfg[key]}")
-            continue
-
-        if key in train_config:
-            cfg[key] = train_config[key]
-        else:
-            cfg[key] = _FALLBACK_MODEL_CFG[key]
-            logging.warning(
-                f"train_config missing '{key}', using fallback = {cfg[key]}")
-    return cfg
-
-
-def build_model(
-    dataset: PCVRParquetDataset,
-    model_cfg: Dict[str, Any],
-    ns_groups_json: Optional[str] = None,
-    device: str = 'cpu',
-) -> PCVRHyFormer:
-    """Construct a ``PCVRHyFormer`` from the dataset schema, an NS-groups JSON,
-    and a resolved ``model_cfg`` dict.
-
-    Args:
-        dataset: a ``PCVRParquetDataset`` providing the feature schema.
-        model_cfg: resolved model hyperparameters, typically the output of
-            ``resolve_model_cfg``.
-        ns_groups_json: path to the NS-groups JSON file, or ``None`` / empty
-            string to disable it (each feature becomes its own singleton group).
-        device: torch device.
-    """
-    # NS grouping. The JSON schema uses *fid* (feature id) values; convert
-    # them to positional indices into ``user_int_schema.entries`` /
-    # ``item_int_schema.entries`` so ``GroupNSTokenizer`` /
-    # ``RankMixerNSTokenizer`` can index ``feature_specs`` directly. This is
-    # the same conversion ``train.py`` performs when loading the JSON; doing
-    # it here keeps infer.py symmetric with training.
-    user_ns_groups: List[List[int]]
-    item_ns_groups: List[List[int]]
-    if ns_groups_json and os.path.exists(ns_groups_json):
-        logging.info(f"Loading NS groups from {ns_groups_json}")
-        with open(ns_groups_json, 'r') as f:
-            ns_groups_cfg = json.load(f)
-        user_fid_to_idx = {
-            fid: i for i, (fid, _, _) in enumerate(dataset.user_int_schema.entries)
-        }
-        item_fid_to_idx = {
-            fid: i for i, (fid, _, _) in enumerate(dataset.item_int_schema.entries)
-        }
-        try:
-            user_ns_groups = [
-                [user_fid_to_idx[f] for f in fids]
-                for fids in ns_groups_cfg['user_ns_groups'].values()
-            ]
-            item_ns_groups = [
-                [item_fid_to_idx[f] for f in fids]
-                for fids in ns_groups_cfg['item_ns_groups'].values()
-            ]
-        except KeyError as exc:
-            raise KeyError(
-                f"NS-groups JSON references fid {exc.args[0]} which is not "
-                f"present in the checkpoint's schema.json. The ns_groups.json "
-                f"and schema.json must come from the same training run."
-            ) from exc
-    else:
-        logging.info("No NS groups JSON found, using default: each feature as one group")
-        user_ns_groups = [[i] for i in range(len(dataset.user_int_schema.entries))]
-        item_ns_groups = [[i] for i in range(len(dataset.item_int_schema.entries))]
-
-    # Feature specs.
-    user_int_feature_specs = build_feature_specs(
-        dataset.user_int_schema, dataset.user_int_vocab_sizes)
-    item_int_feature_specs = build_feature_specs(
-        dataset.item_int_schema, dataset.item_int_vocab_sizes)
-
-    logging.info(f"Building PCVRHyFormer with cfg: {model_cfg}")
-    model = PCVRHyFormer(
-        user_int_feature_specs=user_int_feature_specs,
-        item_int_feature_specs=item_int_feature_specs,
-        user_dense_dim=dataset.user_dense_schema.total_dim,
-        item_dense_dim=dataset.item_dense_schema.total_dim,
-        seq_vocab_sizes=dataset.seq_domain_vocab_sizes,
-        user_ns_groups=user_ns_groups,
-        item_ns_groups=item_ns_groups,
-        **model_cfg,
-    ).to(device)
-
-    return model
-
-
-def load_model_state_strict(
-    model: nn.Module,
-    ckpt_path: str,
-    device: str,
-) -> None:
-    """Strictly load ``state_dict``; any missing/unexpected key fails fast
-    with a diagnostic message.
-    """
-    state_dict = torch.load(ckpt_path, map_location=device)
-    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
-        state_dict = {k.removeprefix('_orig_mod.'): v for k, v in state_dict.items()}
-    try:
-        model.load_state_dict(state_dict, strict=True)
-    except RuntimeError as e:
-        logging.error(
-            "Failed to load state_dict in strict mode. This usually means the "
-            "model constructed by build_model does NOT match the checkpoint. "
-            "Check that train_config.json in the ckpt dir is present and matches "
-            "the training hyperparameters.")
-        raise e
-
-
-def get_ckpt_path() -> Optional[str]:
-    """Locate the first ``*.pt`` file inside the directory pointed at by
-    ``$MODEL_OUTPUT_PATH``. Returns ``None`` if no checkpoint is found.
-    """
-    ckpt_path = os.environ.get("MODEL_OUTPUT_PATH")
-    if not ckpt_path:
-        return None
-    for item in os.listdir(ckpt_path):
-        if item.endswith(".pt"):
-            return os.path.join(ckpt_path, item)
-    return None
-
-
-def _manual_auc(labels: List[int], probs: List[float]) -> float:
-    """Manual AUC computation — no sklearn dependency."""
-    pairs = sorted(zip(probs, labels), key=lambda x: x[0])
-    pos_count = sum(labels)
-    neg_count = len(labels) - pos_count
-    if pos_count == 0 or neg_count == 0:
-        return float("nan")
-    auc = 0.0
-    neg_below = 0
-    for prob, lbl in pairs:
-        if lbl == 1:
-            auc += neg_below
-        else:
-            neg_below += 1
-    return auc / (pos_count * neg_count)
-
-
-def _run_q4_diagnose(model, dataset, device):
-    """Q4: Content vs Time awareness — shuffle ablation."""
-    import numpy as np
-    logging.info("=" * 60)
-    logging.info("Q4: CONTENT vs TIME AWARENESS (shuffle ablation)")
-    logging.info("=" * 60)
-
-    # need labels — verify dataset has them
-    test_loader = DataLoader(dataset, batch_size=None, num_workers=min(4, os.cpu_count() or 1),
-                             prefetch_factor=2, pin_memory=torch.cuda.is_available())
-
-    def _collect_auc(loader, shuffle_mode="none", max_batches=0):
-        probs_all, labels_all = [], []
-        with torch.no_grad():
-            for bi, batch in enumerate(loader):
-                if max_batches and bi >= max_batches:
-                    break
-                # move to device
-                db = {}
-                for k, v in batch.items():
-                    if isinstance(v, torch.Tensor):
-                        db[k] = v.to(device, non_blocking=True)
-                    else:
-                        db[k] = v
-
-                label = db.get("label")
-                if label is None:
-                    return float("nan")
-                if hasattr(label, "numpy"):
-                    label = label.cpu().numpy()
-                elif isinstance(label, list):
-                    label = np.array(label)
-                else:
-                    label = np.zeros(len(db[list(db.keys())[0]]))
-
-                # apply shuffle
-                if shuffle_mode == "time":
-                    for d in db.get("_seq_domains", []):
-                        tb_key = f"{d}_time_bucket"
-                        if tb_key in db:
-                            tb = db[tb_key]
-                            idx = torch.randperm(tb.shape[0], device=device)
-                            db[tb_key] = tb[idx]
-                elif shuffle_mode == "fid":
-                    for d in db.get("_seq_domains", []):
-                        seq = db[d]
-                        B, nf, L = seq.shape
-                        for bb in range(B):
-                            perm = torch.randperm(L, device=device)
-                            db[d][bb] = seq[bb, :, perm]
-
-                mi = _batch_to_model_input(db, device)
-                logits, _ = model.predict(mi)
-                p = torch.sigmoid(logits.squeeze(-1)).cpu().numpy()
-                probs_all.extend(p.tolist())
-                labels_all.extend(label.tolist())
-
-        return _manual_auc(labels_all, probs_all)
-
-    # Sampling: read Q4_SAMPLE_BATCHES env var (default 300 batches)
-    n_max = int(os.environ.get('Q4_SAMPLE_BATCHES', '300'))
-    logging.info(f"Q4 sampling: max {n_max} batches per pass")
-
-    logging.info("Computing baseline AUC...")
-    auc_base = _collect_auc(test_loader, "none", max_batches=n_max)
-    logging.info("Computing shuffle-time AUC...")
-    auc_time = _collect_auc(test_loader, "time", max_batches=n_max)
-    logging.info("Computing shuffle-fid AUC...")
-    auc_fid = _collect_auc(test_loader, "fid", max_batches=n_max)
-
-    time_drop = auc_base - auc_time
-    fid_drop = auc_base - auc_fid
-
-    logging.info("=" * 60)
-    logging.info("Q4 RESULTS")
-    logging.info(f"  baseline           AUC = {auc_base:.6f}")
-    logging.info(f"  shuffle time       AUC = {auc_time:.6f}  (drop = {time_drop:+.6f})")
-    logging.info(f"  shuffle fid order  AUC = {auc_fid:.6f}  (drop = {fid_drop:+.6f})")
-    logging.info("  --- interpretation ---")
-    if time_drop > 0.001 and fid_drop < 0.0003:
-        logging.info("  model relies HEAVILY on time, barely on content")
-        logging.info("  -> content-interaction optimisations may have room")
-    elif fid_drop > 0.001 and time_drop < 0.0003:
-        logging.info("  model relies on content, time is weak")
-        logging.info("  -> time bias direction fully exploited; content mining is path")
-    elif time_drop > 0.001 and fid_drop > 0.001:
-        logging.info("  model uses both time and content — balanced")
-        logging.info("  -> either direction valid, pick cheaper one")
-    else:
-        logging.info("  both drops small — model may rely on non-seq features")
-    logging.info("=" * 60)
 
 
 def _run_data_diagnose(model_dir, data_dir, schema_path, seq_max_lens, batch_size):
@@ -441,7 +64,7 @@ def _run_data_diagnose(model_dir, data_dir, schema_path, seq_max_lens, batch_siz
         train_json = os.path.join(os.path.dirname(data_dir), "feature_stats.json")
     if not os.path.exists(train_json):
         logging.error("feature_stats.json not found in model_dir or parent of data_dir. "
-                       "Run EXPLORE_MODE=true on train first.")
+                       "Run explore_all.py on train first.")
         return
     with open(train_json) as f:
         train_stats = json.load(f)
@@ -468,7 +91,6 @@ def _run_data_diagnose(model_dir, data_dir, schema_path, seq_max_lens, batch_siz
     # 3. Prepare test-side accumulators matching train's feature layout
     user_int_entries = test_dataset.user_int_schema.entries
     item_int_entries = test_dataset.item_int_schema.entries
-    user_dense_entries = test_dataset.user_dense_schema.entries
     n_dense = test_dataset.user_dense_schema.total_dim
 
     class DistAcc:
@@ -705,43 +327,8 @@ def _run_data_diagnose(model_dir, data_dir, schema_path, seq_max_lens, batch_siz
     print(f"  Consistent (OK):         {ok_count}")
     print(f"  High drift:              {len(high)}")
     print(f"  Train AUC source:        {train_json}")
-    print(f"  → Run EXPLORE_MODE=true on train first to generate feature_stats.json")
+    print(f"  → Run explore_all.py on train first to generate feature_stats.json")
     print("=" * 72)
-
-
-def _batch_to_model_input(
-    batch: Dict[str, Any],
-    device: str,
-) -> ModelInput:
-    """Convert a batch dict to ``ModelInput``, handling dynamic seq domains."""
-    device_batch: Dict[str, Any] = {}
-    for k, v in batch.items():
-        if isinstance(v, torch.Tensor):
-            device_batch[k] = v.to(device, non_blocking=True)
-        else:
-            device_batch[k] = v
-
-    seq_domains = device_batch['_seq_domains']
-    seq_data: Dict[str, torch.Tensor] = {}
-    seq_lens: Dict[str, torch.Tensor] = {}
-    seq_time_buckets: Dict[str, torch.Tensor] = {}
-    for domain in seq_domains:
-        seq_data[domain] = device_batch[domain]
-        seq_lens[domain] = device_batch[f'{domain}_len']
-        B, _, L = device_batch[domain].shape
-        seq_time_buckets[domain] = device_batch.get(
-            f'{domain}_time_bucket',
-            torch.zeros(B, L, dtype=torch.long, device=device))
-
-    return ModelInput(
-        user_int_feats=device_batch['user_int_feats'],
-        item_int_feats=device_batch['item_int_feats'],
-        user_dense_feats=device_batch['user_dense_feats'],
-        item_dense_feats=device_batch['item_dense_feats'],
-        seq_data=seq_data,
-        seq_lens=seq_lens,
-        seq_time_buckets=seq_time_buckets,
-    )
 
 
 def main() -> None:
@@ -757,7 +344,6 @@ def main() -> None:
         logging.error("MODEL_OUTPUT_PATH and EVAL_DATA_PATH must be set.")
         return
 
-    # Schema: prefer model_dir (train schema), fall back to data_dir
     schema_path = os.path.join(model_dir, 'schema.json')
     if not os.path.exists(schema_path):
         schema_path = os.path.join(data_dir, 'schema.json')
