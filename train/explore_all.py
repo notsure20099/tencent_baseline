@@ -235,76 +235,68 @@ def main():
         for i in range(0, len(items), per_line):
             yield "  ".join(str(x) for x in items[i:i + per_line])
 
-    # Build all report lines first, then emit via logging
-    lines = []
-    def emit(s=""):
-        lines.append(s)
+    print("=" * 72)
+    print("FEATURE EXPLORATION REPORT — TRAIN DATA")
+    print("=" * 72)
+    print(f"Rows: {total_rows:,}  user_int: {n_user}  item_int: {n_item}  dense: {n_dense}  scan: {scan_time:.1f}s")
+    print()
 
-    emit("=" * 72)
-    emit("FEATURE EXPLORATION REPORT — TRAIN DATA")
-    emit("=" * 72)
-    emit(f"Rows: {total_rows:,}  user_int: {n_user}  item_int: {n_item}  dense: {n_dense}  scan: {scan_time:.1f}s")
-    emit()
-
-    emit("─ M0: INT FEATURE DISTRIBUTION + AUC (5 per line, copy to diff) ─")
-    emit("COL: FEATURE_TYPE FID AUC NZ_RATE MEAN STD | ...")
+    print("─ M0: INT FEATURE DISTRIBUTION + AUC (5 per line, copy to diff) ─")
+    print("COL: FEATURE_TYPE FID AUC NZ_RATE MEAN STD | ...")
     feats = [f"{s['type']} {s['fid']} {s['auc']:.4f} {s['nz_rate']:.4f} {s['mean']:.2f} {s['std']:.2f}"
              for key in sorted(int_summary.keys()) for s in [int_summary[key]]]
     for line in _pack(feats, 5):
-        emit(line)
-    emit()
+        print(line)
+    print()
 
-    emit("─ M1: SCHEMA SUMMARY ─")
+    print("─ M1: SCHEMA SUMMARY ─")
     nz_above_50 = sum(1 for s in int_summary.values() if s['nz_rate'] > 0.5)
     nz_above_10 = sum(1 for s in int_summary.values() if s['nz_rate'] > 0.1)
     nz_below_1 = sum(1 for s in int_summary.values() if s['nz_rate'] < 0.01)
-    emit(f"  user_int: {n_user} fids  item_int: {n_item} fids  nz>50%: {nz_above_50}  nz>10%: {nz_above_10}  nz<1%: {nz_below_1}")
-    emit(f"  dense: {n_dense} dims from fids {', '.join(str(f) for f, _, _ in user_dense_entries)}")
-    emit()
+    print(f"  user_int: {n_user} fids  item_int: {n_item} fids  nz>50%: {nz_above_50}  nz>10%: {nz_above_10}  nz<1%: {nz_below_1}")
+    print(f"  dense: {n_dense} dims from fids {', '.join(str(f) for f, _, _ in user_dense_entries)}")
+    print()
 
-    emit("─ M2: INT FEATURE AUC (key auc|nz%, 5 per line) ─")
+    print("─ M2: INT FEATURE AUC (key auc|nz%, 5 per line) ─")
     auc_items = [f"{k} {v:.4f}|{int_summary.get(k, {}).get('nz_rate', 0):.1%}"
                  for k, v in auc_results]
     for line in _pack(auc_items, 5):
-        emit(line)
-    emit()
+        print(line)
+    print()
 
-    emit("─ M3: FEATURE CLASSIFICATION ─")
+    print("─ M3: FEATURE CLASSIFICATION ─")
     strong = [(k, v) for k, v in auc_results if v > 0.53]
     medium = [(k, v) for k, v in auc_results if 0.51 < v <= 0.53]
-    emit(f"S (AUC>0.53): {len(strong)} {', '.join(k for k,_ in strong) if strong else '(none)'}")
-    emit(f"A (AUC 0.51-0.53): {len(medium)} {', '.join(k for k,_ in medium) if medium else '(none)'}")
-    emit(f"B (AUC<=0.51): {len(weak)}")
-    emit()
+    print(f"S (AUC>0.53): {len(strong)} {', '.join(k for k,_ in strong) if strong else '(none)'}")
+    print(f"A (AUC 0.51-0.53): {len(medium)} {', '.join(k for k,_ in medium) if medium else '(none)'}")
+    print(f"B (AUC<=0.51): {len(weak)}")
+    print()
 
-    emit("─ M4: DENSE DIM STATS ─")
+    print("─ M4: DENSE DIM STATS ─")
     dense_sorted = sorted(dense_summary, key=lambda x: -x["nz_rate"])[:40]
     items = [f"d{d['dim']}:{d['nz_rate']:.1%}|{d['mean']:.4f}|{d['std']:.4f}"
              for d in dense_sorted]
-    emit(f"Top 40 by nz_rate: {'  '.join(items[:20])}")
+    print(f"Top 40 by nz_rate: {'  '.join(items[:20])}")
     if len(items) > 20:
-        emit(f"  {'  '.join(items[20:])}")
+        print(f"  {'  '.join(items[20:])}")
     dense_by_mean = sorted(dense_summary, key=lambda x: -abs(x["mean"]))[:20]
     items2 = [f"d{d['dim']}:{d['mean']:.6f}|{d['nz_rate']:.1%}" for d in dense_by_mean]
-    emit(f"Top 20 by |mean|: {'  '.join(items2)}")
-    emit()
+    print(f"Top 20 by |mean|: {'  '.join(items2)}")
+    print()
 
-    emit("─ M5: I2 SPOTLIGHT (item fids 5,6,7,8,12) ─")
+    print("─ M5: I2 SPOTLIGHT (item fids 5,6,7,8,12) ─")
     i2_parts = []
     for fid_s in ["5", "6", "7", "8", "12"]:
         s = int_summary.get(f"item_int_{fid_s}", {})
         auc_v = s.get('auc', 0)
         i2_parts.append(f"{fid_s}:AUC={auc_v:.4f}|nz={s.get('nz_rate', 0):.1%}|m={s.get('mean', 0):.1f}|s={s.get('std', 0):.1f}")
-    emit(f"  {'  '.join(i2_parts)}")
-    emit()
+    print(f"  {'  '.join(i2_parts)}")
+    print()
 
-    emit("─ SUMMARY ─")
+    print("─ SUMMARY ─")
     if auc_results:
-        emit(f"AUC>0.5: {sum(1 for _,v in auc_results if v>0.5)}/{len(auc_results)}  Max: {auc_results[0][1]:.4f}({auc_results[0][0]})  Median: {auc_results[len(auc_results)//2][1]:.4f}")
-    emit("=" * 72)
-
-    for l in lines:
-        log.info(l)
+        print(f"AUC>0.5: {sum(1 for _,v in auc_results if v>0.5)}/{len(auc_results)}  Max: {auc_results[0][1]:.4f}({auc_results[0][0]})  Median: {auc_results[len(auc_results)//2][1]:.4f}")
+    print("=" * 72)
 
     total_time = time.time() - t0
     log.info("Total time: %.1fs", total_time)
