@@ -3,11 +3,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  feature_audit: full-data feature exploration (train side)
-#  Usage:
-#    ./run.sh                        → full scan
-#    ./run.sh --max_batches 1        → quick 1-batch test
-#    ./run.sh --max_batches 10       → 10 batch test
+#  feature_audit: random-sampled feature exploration (train side)
+#  --sample_ratio 0.1 = 10% random sampling (shuffle + buffer_batches)
+#  --max_batches N    = fixed N batches (no shuffle)
 # ══════════════════════════════════════════════════════════════════════════
 
-python3 -u "${SCRIPT_DIR}/explore_all.py" "$@"
+python3 -u "${SCRIPT_DIR}/explore_all.py" --sample_ratio 0.1 "$@"

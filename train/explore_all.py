@@ -110,6 +110,8 @@ def main():
                         help="Training data directory")
     parser.add_argument("--max_batches", type=int, default=0,
                         help="Limit batches (0=full). Use 1 for quick test.")
+    parser.add_argument("--sample_ratio", type=float, default=1.0,
+                        help="Random sample ratio (0.1 = 10%%, default=1.0=full)")
     args, _ = parser.parse_known_args()
 
     if not args.data_dir:
@@ -132,12 +134,31 @@ def main():
     batch_size = 256
     num_workers = int(os.environ.get("EXPLORE_NUM_WORKERS", "4"))
 
-    log.info("Loading dataset (full, streaming)...")
+    log.info("Loading dataset (streaming)...")
     dataset = PCVRParquetDataset(
         parquet_path=data_dir, schema_path=schema_path,
         batch_size=batch_size, seq_max_lens=seq_max_lens,
         shuffle=False, buffer_batches=0, is_training=True,
     )
+
+    total_rows = dataset.num_rows
+    total_batches = max(1, total_rows // batch_size + (1 if total_rows % batch_size else 0))
+    if 0 < args.sample_ratio < 1.0:
+        target_batches = max(1, int(total_batches * args.sample_ratio))
+        log.info("Random sampling %.0f%%: %d/%d batches (%d/%d rows)", args.sample_ratio * 100,
+                 target_batches, total_batches, target_batches * batch_size, total_rows)
+        dataset = PCVRParquetDataset(
+            parquet_path=data_dir, schema_path=schema_path,
+            batch_size=batch_size, seq_max_lens=seq_max_lens,
+            shuffle=True, buffer_batches=20, is_training=True,
+        )
+    elif args.max_batches > 0:
+        target_batches = args.max_batches
+        log.info("Limited to %d batches", target_batches)
+    else:
+        target_batches = total_batches
+        log.info("Full scan: %d batches, %d rows", total_batches, total_rows)
+
     loader = DataLoader(dataset, batch_size=None, num_workers=num_workers)
 
     user_int_entries = dataset.user_int_schema.entries
@@ -150,7 +171,6 @@ def main():
     n_user = len(user_int_entries)
     n_item = len(item_int_entries)
     n_dense = user_dense_dim
-    total_rows = dataset.num_rows
 
     log.info("Data: %d rows, %d user_int, %d item_int, %d dense dims",
              total_rows, n_user, n_item, n_dense)
@@ -199,8 +219,8 @@ def main():
 
         batch_count += 1
         if batch_count % 1000 == 0:
-            print(f"  [{batch_count}] {batch_count * batch_size} rows scanned...", flush=True)
-        if args.max_batches > 0 and batch_count >= args.max_batches:
+            print(f"  [{batch_count}/{target_batches}] {batch_count * batch_size} rows scanned...", flush=True)
+        if batch_count >= target_batches:
             break
 
     scan_time = time.time() - t0
