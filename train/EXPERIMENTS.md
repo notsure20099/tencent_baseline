@@ -47,10 +47,26 @@ Exp37: I2 Token Enhance（I2 拆分为 2 个独立 NS token）
   改动:        仅修改 ns_groups.json:
                I2: [5,6,7,8,12] → I2a: [5,6] + I2b: [7,8,12]
                item token 数: 4 → 5, 总 NS tokens: 15 → 16
-  T 值变化:    T = 1*4 + (7+4+5+1) = 4+17 = 21
-               d_model=64 → 64%21≠0 → RankMixer 自动降级 ffn_only
-  Test AUC:    等待训练
-  判定:        等待结果
+  T 值:        T = 1*4 + (7+4+5) = 20 (item_dense=0)
+               d_model=64 → 64%20≠0 → RankMixer ffn_only
+
+  Valid AUC 逐 Epoch:
+    E1: 0.86348  E2: 0.86685  E3: 0.86722*  E4: 0.86717
+  峰值:        E3 0.86722
+  与 Exp29 对比: E3 同时见顶，全程平行，无差异
+
+  time_bias 监控:
+    E1: seq_d=5.34  seq_c=5.78
+    E2: seq_d=9.17  seq_c=7.51
+    E3: seq_d=11.10 seq_c=8.42
+    E4: seq_d=13.11 seq_c=9.04
+    sep 锁死在 1.41-1.42
+
+  判定:        I2 拆分是中性变量。Valid AUC 与 Exp29 完全平行，
+               既无增益也无损害。多出的 token 未被有效利用。
+  启示:        减少噪音 token（P1: 合并无信号 token）比增强单 token 更有价值。
+
+  Test AUC:    等待中
 
 ═══════════════════════════════════════════════════════════════════════════════
 Exp36: AttentionPooling (learnable attention query replaces MeanPool)
@@ -171,4 +187,5 @@ Test AUC 汇总排行
   11.（Exp36）Attention Pooling 实质上归为 MeanPool，注意力完全弥散。
   12.（NS 探索）非序列特征在浅层同样无独立区分力（全部 AUC 0.47-0.53）。
       唯一正信号：I2 item 特征组（AUC 0.5534）。
-      信息存在于深度交互，不在浅层统计量。
+  13.（Exp37）I2 Token 增强是中性变量——Valid AUC 与 Exp29 完全平行。
+      单独增强一个 token 不够，减少噪音 token 才是更有效方向。
