@@ -379,7 +379,8 @@ def main() -> None:
         logging.info(f"Using EVAL_BATCH_SIZE={batch_size} (overriding training config)")
     else:
         batch_size = int(train_config.get('batch_size', _FALLBACK_BATCH_SIZE))
-    num_workers = int(train_config.get('num_workers', _FALLBACK_NUM_WORKERS))
+    num_workers = int(os.environ.get('EVAL_NUM_WORKERS', '0'))
+    logging.info(f"Using num_workers={num_workers}")
 
     test_dataset = PCVRParquetDataset(
         parquet_path=data_dir,

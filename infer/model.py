@@ -543,6 +543,7 @@ class MultiSeqQueryGenerator(nn.Module):
             scores = tokens_i @ self.attn_query[i]                  # (B, L_i)
             scores = scores.masked_fill(~valid, float('-inf'))
             weights = torch.softmax(scores, dim=-1)                 # (B, L_i)
+            weights = torch.nan_to_num(weights, nan=0.0)           # all-padding → uniform zero
             seq_pooled = (tokens_i * weights.unsqueeze(-1)).sum(dim=1)  # (B, D)
             self._last_attn_weights.append(weights.detach())
 
