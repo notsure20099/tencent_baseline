@@ -163,6 +163,7 @@ def main():
 
     log.info("Scanning batches...")
     batch_count = 0
+    max_batches = int(os.environ.get("EXPLORE_MAX_BATCHES", "0"))
     for batch in loader:
         labels = batch["label"].numpy().astype(np.int64)
         user_int = batch["user_int_feats"].numpy()
@@ -191,6 +192,8 @@ def main():
         batch_count += 1
         if batch_count % 500 == 0:
             log.info("  %d batches, %d rows...", batch_count, batch_count * batch_size)
+        if max_batches > 0 and batch_count >= max_batches:
+            break
 
     scan_time = time.time() - t0
     log.info("Scan done: %d batches in %.1fs", batch_count, scan_time)
