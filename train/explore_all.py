@@ -196,7 +196,7 @@ def main():
     log.info("Scan done: %d batches in %.1fs", batch_count, scan_time)
 
     # ═══════════════════════════════════════════════════════════
-    REPORT
+    # REPORT
     # ═══════════════════════════════════════════════════════════
 
     auc_results = []

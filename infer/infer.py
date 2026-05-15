@@ -141,7 +141,7 @@ def main():
     logging.info("Scan done: %d batches", batch_count)
 
     # ══════════════════════════════════════════════════════════════
-    REPORT
+    # REPORT
     # ══════════════════════════════════════════════════════════════
     print("=" * 72)
     print("FEATURE DISTRIBUTION REPORT — TEST DATA")
