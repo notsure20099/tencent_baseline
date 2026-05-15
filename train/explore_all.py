@@ -198,8 +198,6 @@ def main():
             dense_dists[d].update(user_dense[:, d])
 
         batch_count += 1
-        if batch_count % 500 == 0:
-            log.info("  %d batches, %d rows...", batch_count, batch_count * batch_size)
         if args.max_batches > 0 and batch_count >= args.max_batches:
             break
 
