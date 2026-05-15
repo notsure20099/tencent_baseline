@@ -276,6 +276,7 @@ def main():
     print("─ M3: FEATURE CLASSIFICATION ─")
     strong = [(k, v) for k, v in auc_results if v > 0.53]
     medium = [(k, v) for k, v in auc_results if 0.51 < v <= 0.53]
+    weak = [(k, v) for k, v in auc_results if v <= 0.51]
     print(f"S (AUC>0.53): {len(strong)} {', '.join(k for k,_ in strong) if strong else '(none)'}")
     print(f"A (AUC 0.51-0.53): {len(medium)} {', '.join(k for k,_ in medium) if medium else '(none)'}")
     print(f"B (AUC<=0.51): {len(weak)}")
