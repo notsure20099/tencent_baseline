@@ -296,7 +296,8 @@ def main():
     i2_parts = []
     for fid_s in ["5", "6", "7", "8", "12"]:
         s = int_summary.get(f"item_int_{fid_s}", {})
-        i2_parts.append(f"{fid_s}:AUC={s.get('auc', '?'):>7s}|nz={s.get('nz_rate', 0):.1%}|m={s.get('mean', 0):.1f}|s={s.get('std', 0):.1f}")
+        auc_v = s.get('auc', 0)
+        i2_parts.append(f"{fid_s}:AUC={auc_v:.4f}|nz={s.get('nz_rate', 0):.1%}|m={s.get('mean', 0):.1f}|s={s.get('std', 0):.1f}")
     print(f"  {'  '.join(i2_parts)}")
     print()
 
