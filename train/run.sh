@@ -4,8 +4,10 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  feature_audit: full-data feature exploration (train side)
-#  Runs explore_all.py — stream through all features, compute per-fid AUC,
-#  save feature_stats.json sidecar for test-side comparison.
+#  Usage:
+#    ./run.sh                        → full scan
+#    ./run.sh --max_batches 1        → quick 1-batch test
+#    ./run.sh --max_batches 10       → 10 batch test
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/explore_all.py" "$@"

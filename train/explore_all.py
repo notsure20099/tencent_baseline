@@ -5,6 +5,7 @@ Runs on TRAIN data. Computes per-feature AUC and distribution stats.
 All results are printed (no file I/O).
 """
 
+import argparse
 import os
 import sys
 import time
@@ -104,11 +105,19 @@ class DistStats:
 
 
 def main():
-    t0 = time.time()
-    data_dir = os.environ.get("TRAIN_DATA_PATH", "")
-    if not data_dir:
-        log.error("TRAIN_DATA_PATH env var is not set. Abort.")
+    parser = argparse.ArgumentParser(description="Train-side feature exploration")
+    parser.add_argument("--data_dir", type=str, default=os.environ.get("TRAIN_DATA_PATH", ""),
+                        help="Training data directory")
+    parser.add_argument("--max_batches", type=int, default=0,
+                        help="Limit batches (0=full). Use 1 for quick test.")
+    args = parser.parse_args()
+
+    if not args.data_dir:
+        log.error("--data_dir not set and TRAIN_DATA_PATH env var is not set. Abort.")
         return
+
+    t0 = time.time()
+    data_dir = args.data_dir
     schema_path = os.path.join(data_dir, "schema.json")
     if not os.path.exists(schema_path):
         log.error("schema.json not found at %s", schema_path)
@@ -163,7 +172,6 @@ def main():
 
     log.info("Scanning batches...")
     batch_count = 0
-    max_batches = int(os.environ.get("EXPLORE_MAX_BATCHES", "0"))
     for batch in loader:
         labels = batch["label"].numpy().astype(np.int64)
         user_int = batch["user_int_feats"].numpy()
@@ -192,7 +200,7 @@ def main():
         batch_count += 1
         if batch_count % 500 == 0:
             log.info("  %d batches, %d rows...", batch_count, batch_count * batch_size)
-        if max_batches > 0 and batch_count >= max_batches:
+        if args.max_batches > 0 and batch_count >= args.max_batches:
             break
 
     scan_time = time.time() - t0
