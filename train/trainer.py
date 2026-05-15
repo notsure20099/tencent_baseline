@@ -402,6 +402,8 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
+            self._log_param_stats(epoch)
+
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
@@ -553,9 +555,50 @@ class PCVRHyFormerRankingTrainer:
 
         return auc, logloss
 
+    @torch.no_grad()
+    def _log_param_stats(self, epoch: int) -> None:
+        """Log NS tokenizer group-level weight norms and temporal_bias stats.
+        Helps track whether noise-compressed groups receive less gradient.
+        """
+        raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+
+        # NS tokenizer group-level projection weight norms
+        for side, tokenizer in [("user", raw.user_ns_tokenizer), ("item", raw.item_ns_tokenizer)]:
+            if hasattr(tokenizer, 'group_projs'):
+                for gi, proj in enumerate(tokenizer.group_projs):
+                    w_norm = float(proj[0].weight.norm())
+                    logging.info(f"[Param] ns_{side}_g{gi} proj_norm={w_norm:.4f}")
+
+        # temporal_bias per domain (cross-attn in first block)
+        if hasattr(raw, 'blocks') and len(raw.blocks) > 0:
+            for ca_idx, ca in enumerate(raw.blocks[0].cross_attns):
+                if hasattr(ca, 'use_time_bias') and ca.use_time_bias:
+                    tb = ca.temporal_bias.weight
+                    domain = {0: 'seq_a', 1: 'seq_b', 2: 'seq_c', 3: 'seq_d'}.get(ca_idx, f'ca_{ca_idx}')
+                    logging.info(f"[Param] time_bias_{domain} norm={float(tb.norm()):.4f} "
+                                 f"mean={float(tb[1:].mean()):+.4f} "
+                                 f"head_range=[{float(tb[:,0].min()):+.4f}, {float(tb[:,0].max()):+.4f}]")
+
+        # RankMixer FFN weight statistics
+        if hasattr(raw, 'blocks'):
+            for bi, block in enumerate(raw.blocks):
+                mixer = block.mixer
+                if hasattr(mixer, 'fc1') and hasattr(mixer, 'fc2'):
+                    fc1_norm = float(mixer.fc1.weight.norm())
+                    fc2_norm = float(mixer.fc2.weight.norm())
+                    logging.info(f"[Param] mixer_b{bi} fc1_norm={fc1_norm:.4f} fc2_norm={fc2_norm:.4f}")
+
+        # Global weight statistics
+        params = list(raw.parameters())
+        norms = sorted([float(p.norm()) for p in params if p.numel() > 1])
+        if norms:
+            p10, p50, p90 = norms[len(norms)//10], norms[len(norms)//2], norms[len(norms)*9//10]
+            logging.info(f"[Param] global_norms p10={p10:.4f} p50={p50:.4f} p90={p90:.4f} "
+                         f"max={norms[-1]:.4f}")
+
     def _evaluate_step(
-        self, batch: Dict[str, Any]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+            self, batch: Dict[str, Any]
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run a single validation step and return ``(logits, labels)``."""
         device_batch = self._batch_to_device(batch)
         label = device_batch['label']

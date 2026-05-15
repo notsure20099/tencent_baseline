@@ -3,7 +3,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp38a_NoiseCompress: B-tier user features merged to 2 noise groups
+#  Baseline Exp29 (PerHeadTimeBias). Item groups unchanged.
+#  d_model=64, T=13 → ffn_only. Epoch-end param monitoring enabled.
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
