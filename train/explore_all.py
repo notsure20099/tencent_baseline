@@ -218,7 +218,7 @@ def main():
             dense_dists[d].update(user_dense[:, d])
 
         batch_count += 1
-        if batch_count % 1000 == 0:
+        if batch_count % 100 == 0:
             print(f"  [{batch_count}/{target_batches}] {batch_count * batch_size} rows scanned...", flush=True)
         if batch_count >= target_batches:
             break
