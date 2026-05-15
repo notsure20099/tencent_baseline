@@ -1,72 +1,174 @@
-﻿
-===========================================================================
+# 实验记录
+# ========
+# 格式：日期 | 分支 | 类型(train/infer/explore) | 关键指标 | 判定
+# ═══════════════════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════════════════
+NS 特征数据探索（M1-M5 五模块审计）
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-15
+  分支:        exp34_time_residual (train/explore_ns.py + train/ns_explore.txt)
+  方法:        纯数据分析，全量 189 万样本，不依赖 GPU
+  模块:
+    M1 特征基础审计:  各 fid 的 vocab、缺失率、top-10 覆盖率
+    M2 单特征区分力:  per-fid AUC (LR)
+    M3 用户×物品交互: per-group AUC + pairwise interaction boost
+    M4 Dense 维度信息: per-dim AUC, top-30
+    M5 高基数特征:    emb_skip_threshold 跳过的特征列表
+
+  关键发现:
+    M1:  大量 user_int fid 缺失率 > 50%，过半 fid 的 vocab ≤ 8（近乎标签）
+         user_dense fid=62-66 数值尺度极大（mean≈15万~27万）
+    M2:  没有任何单特征 AUC > 0.53（最高 user_int fid=98: 0.5271,
+         user_dense fid=66: 0.5286）→ 单特征就是随机
+    M3:  I2 (fids 5,6,7,8,12) 单独 AUC = 0.5534，唯一有区分力的 token 组
+         I2 + 任意用户组 → AUC 反而微降至 0.550 → I2 信号自足，不依赖用户特征
+         其他所有 user_ns / item_ns 组的 AUC 在 0.50-0.51
+         交互 boost max = +0.0238（数据上看起来大，实际因 I1 本身太弱）
+    M4:  fid=61 的 13/256 维度 AUC > 0.55，最高 dim 168: 0.6097
+         其余 243 维为噪音
+    M5:  无特征被 emb_skip_threshold 跳过
+
+  判定:
+    - 非序列特征在浅层层面与序列特征一样，几乎没有独立区分力
+    - 所有浅层特征 AUC 集中在 0.47-0.53 区间
+    - 唯一正信号：I2 token 组 (AUC 0.5534)
+    - 启示：信息存在于深度交互中，不在浅层统计量
+    - 下一步：I2 独立 token 增强（Exp37）
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp37: I2 Token Enhance（I2 拆分为 2 个独立 NS token）
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-15
+  分支:        exp37_i2_token
+  基线:        Exp29 (Test AUC 0.84727)
+  背景:        NS 探索发现 I2 是唯一有区分力的 token 组(AUC 0.5534)，
+               其他 14 个 NS token 携带信号极弱(AUC 0.50-0.51)。
+  改动:        仅修改 ns_groups.json:
+               I2: [5,6,7,8,12] → I2a: [5,6] + I2b: [7,8,12]
+               item token 数: 4 → 5, 总 NS tokens: 15 → 16
+  T 值变化:    T = 1*4 + (7+4+5+1) = 4+17 = 21
+               d_model=64 → 64%21≠0 → RankMixer 自动降级 ffn_only
+  Test AUC:    等待训练
+  判定:        等待结果
+
+═══════════════════════════════════════════════════════════════════════════════
 Exp36: AttentionPooling (learnable attention query replaces MeanPool)
-===========================================================================
-  date:        2026-05-15
-  branch:      exp36_attn_pool
-  baseline:    Exp29 (Test AUC 0.84727)
-  idea:        MeanPool blindly averages all 256 tokens - the last
-               remaining content bottleneck.  Replace with learnable
-               per-domain attention (4 vectors * 64D = 256 params).
-               Each domain learns WHICH token positions matter via
-               softmax(token_i * attn_query[domain]).
-  change:      MultiSeqQueryGenerator: MeanPool -> Attention Pooling
-               + speed: cudnn.benchmark + TF32 + foreach
-  params:      +256 (4 domains * 64-dim query each)
-  orthogonal:  time_bias untouched, CrossAttn untouched
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-15
+  分支:        exp36_attn_pool
+  基线:        Exp29 (Test AUC 0.84727)
+  改动:        MultiSeqQueryGenerator: MeanPool → Attention Pooling
+               每个域 1 个可学习 attn_query (64维) × 4 域 = 256 参数
+               d_model=64 (RankMixer 退化为 ffn_only)
 
-  valid AUC:   (pending)
-  test AUC:    (pending)
-  verdict:     (pending)
+  Valid AUC:   E1=0.86278 E2=0.86653 … E9=0.86762* E10=0.86745 E11=0.86773*
+  峰值:        E11 0.86773
 
+  注意力监控 (E9-E11 锁死):
+    attn_q_norm: d0=0.270 d1=0.272 d2=0.279 d3=0.198
+    attn_w top3: 2.4%-4.8%（均匀≈1.2%）→ 几乎完全弥散
+  结论:        Attention Pooling ≈ MeanPool，+256 参数白加
+  Test AUC:    等待中
+  判定:        注意力机制未生效。瓶颈不在 Pooling 方式，在 token 表示质量。
 
-Order Probe: sequence position  time mapping
-
-  date:        2026-05-15
-  branch:      exp35_tapered_posenc (train/probe_order.py)
-  method:      30 batches, no model, pure data read
-  result:      ALL 4 domains are recentold (position 0 = most recent)
-               seq_a: p0=41.0  p511=60.0
-               seq_b: p0=41.1  p511=59.7
-               seq_c: p0=45.4  p511=62.7
-               seq_d: p0=29.8  p511=53.5
-  implication: dist_to_end (position-based) maps valid pos500=days-old,
-               test pos500=hours-old  position encoding cannot generalize
-                all position-based optimisations are DOA for this task
-
-
+═══════════════════════════════════════════════════════════════════════════════
 Exp35: TaperedPositionEncoding (learnable position gate in SeqEncoder)
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-14
+  改动:        每域 1 个标量 alpha（共 4 参数）→ token × (1+sigmoid(alpha*dist_to_tail))
+  Valid AUC:   峰值 E6 0.86735
+  Test AUC:    0.84609 (-0.00118)
+  判定:        失败。position-based 在 train/test 长度不同时无法泛化。
 
-  date:        2026-05-14
-  branch:      exp35_tapered_posenc
-  baseline:    Exp29 (Test AUC 0.84727)
-  change:      4 params (1 per domain)  sigmoid(alpha * dist_to_end)
-  valid AUC:   E1=0.86360 E2=0.86621 E3=0.86684 E4=0.86696
-               E5=0.86730 E6=0.86735* E7=0.86725
-               peak E6, converged at +4 epochs
-  alpha final: seq_c=0 / seq_d=+0.057  matches domain ablation
-  test AUC:    0.84609 (-0.00118 from Exp29)
-  verdict:     FAIL. Position-based encoding cannot generalize when
-               train/test have different sequence lengths (different
-               absolute-time semantics at the same position index).
-  lesson:      content-path optimisation IS valid direction (alpha
-               converged to structurally meaningful values), but
-               must use time_bucket (absolute time) not position
-               (relative) for the encoding basis.
-Exp35: TaperedPositionEncoding (learnable position gate in SeqEncoder)
+═══════════════════════════════════════════════════════════════════════════════
+Exp34: Time Residual Add-Back（后置 per-domain 时间残差 + RankMixer full）
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-14
+  分支:        exp34_time_residual
+  改动:        两次 CrossAttention → time_residual = decoded_q - pure_q
+               RankMixer full mixing 只混 pure_q → 后加回各域时间残差
+  Test AUC:    未完成（训练被 Exp35/36 覆盖）
+  判定:        待定
 
-  date:        2026-05-14
-  branch:      exp35_tapered_posenc
-  baseline:    Exp29 (Test AUC 0.84727)
-  idea:        content path is 4-5x longer than time shortcut  model ignores
-               content.  Give SeqEncoder explicit position awareness so it
-               produces better representations BEFORE time_bias interacts.
-  change:      TransformerEncoder learns a per-domain scalar pos_alpha.
-               Each token scaled by (1 + sigmoid(alpha * dist_to_tail)).
-               Tail tokens get a natural boost; earlier tokens are gated down.
-               Pure content-path modification  time_bias untouched.
-  params:      +4 (1 scalar per SeqEncoder instance  4 domains)
+═══════════════════════════════════════════════════════════════════════════════
+Exp33: RankMixerFull (d_model=76, full mode)
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-14
+  改动:        d_model 64→76 (76%19=0 & 76%4=0)
+  Test AUC:    0.845528 (-0.00174)
+  根因:        full mode token mixing 把 seq_d 的 time_bias 过拟合扩散到全体
+               共享 FFN 被 seq_d 大梯度"绑架"
+  判定:        失败。公式: full = ffn_only + 跨域交互 + 梯度污染
 
-  valid AUC:   (pending)
-  test AUC:    (pending)
-  verdict:     (pending)     vs time_bucket鈫扙mbedding鈫抯oftmax锛夛紝妯″瀷澶╃劧鍊惧悜浜庤蛋鏃堕棿鎹峰緞锛屽拷鐣ュ唴瀹广€?  7. 鎵€鏈夈€屽姞浜嗗弬鏁颁絾娌℃湁鎵撻€氱摱棰堛€嶇殑瀹為獙锛圗xp30/31a/32锛夐兘瀵艰嚧浜?Test AUC 涓嬮檷鎴栨寔骞炽€?     鍦ㄦ病鏈夋墦閫氱摱棰堜箣鍓嶏紝澧炲姞鍙傛暟鍙細澧炲姞杩囨嫙鍚堛€?
+═══════════════════════════════════════════════════════════════════════════════
+Exp32: 容量重分配（num_queries=2 + domain gate）
+═══════════════════════════════════════════════════════════════════════════════
+  Test AUC:    0.845305 (-0.00197)
+  判定:        无效。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp31a: TimeBias MLP
+═══════════════════════════════════════════════════════════════════════════════
+  Test AUC:    0.846817 (-0.00045)
+  判定:        效果平平。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp30: ContentAwareTimeBias
+═══════════════════════════════════════════════════════════════════════════════
+  Test AUC:    0.842565 (-0.00471)
+  判定:        严重失败。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp29: PerHeadTimeBias（当前基线）
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-09
+  改动:        temporal_bias: Embedding(65,1) → Embedding(65,4)
+   Test AUC:    0.84727（最优基线）
+  判定:        核心突破。迄今唯一稳定带来 Test 收益的改动。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp28: TimeBias 起点
+═══════════════════════════════════════════════════════════════════════════════
+  Test AUC:    0.84632
+
+═══════════════════════════════════════════════════════════════════════════════
+Order Probe: 序列位置 ↔ 时间映射
+═══════════════════════════════════════════════════════════════════════════════
+  方法:        30 批纯数据读取
+  结果:        全部 4 域均为「最新事件在 pos=0」
+               seq_a: p0=41.0  p511=60.0 … seq_d: p0=29.8  p511=53.5
+  含义:        train/test 长度不同 → 同 position 对应不同绝对时间
+                → position-based 编码无法泛化
+
+═══════════════════════════════════════════════════════════════════════════════
+Test AUC 汇总排行
+═══════════════════════════════════════════════════════════════════════════════
+  Exp29          （PerHeadTimeBias）              0.84727 ← 最优
+  Exp31a         （TimeBias MLP）                 0.846817
+  Exp28          （TimeBias 起点）                0.84632
+  Exp27          （dense_token_groups=4）         0.846087
+  Exp35          （TaperedPositionEncoding）      0.84609
+  Exp26          （dense_aware_qgen）             0.84579
+  Exp33          （RankMixer full d_model=76）    0.845528
+  Exp32_capacity （num_queries=2 + domain gate）  0.845305
+  Exp20          （ItemBridge）                   0.84444
+  Exp30          （ContentAwareTimeBias）         0.842565
+
+═══════════════════════════════════════════════════════════════════════════════
+经验教训
+═══════════════════════════════════════════════════════════════════════════════
+  1. 时间是当前最重要且唯一被验证有效的信号。
+  2. 在 CrossAttention 之后继续注入时间信号，边际收益为零或为负。
+  3. 序列浅层统计特征（共现/密度/长度）完全没有区分力。
+  4. Valid AUC 0.8675 是硬天花板——必须以 Test AUC 为唯一终判标准。
+  5. RankMixer ffn_only 降级模式从 Exp27 起一直是隐藏瓶颈。
+  6. 内容信号路径比时间信号长 4-5 倍，模型天然倾向走时间捷径。
+  7. 「加参数但未打通瓶颈」的实验都导致 Test AUC 下降。
+  8. （Exp33）full mode 退化根因：共享 FFN 梯度污染。
+  9. （Exp33）单 Q token 是序列信息利用的核心瓶颈。
+  10.（Exp35）position-based 编码无法泛化。
+  11.（Exp36）Attention Pooling 实质上归为 MeanPool，注意力完全弥散。
+  12.（NS 探索）非序列特征在浅层同样无独立区分力（全部 AUC 0.47-0.53）。
+      唯一正信号：I2 item 特征组（AUC 0.5534）。
+      信息存在于深度交互，不在浅层统计量。
