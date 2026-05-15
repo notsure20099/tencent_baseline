@@ -35,19 +35,26 @@ def main():
     from torch.utils.data import DataLoader
     from dataset import PCVRParquetDataset
 
+    model_dir = os.environ.get('MODEL_OUTPUT_PATH')
     data_dir = os.environ.get('EVAL_DATA_PATH')
     if not data_dir:
         logging.error("EVAL_DATA_PATH must be set.")
         return
 
-    schema_path = os.path.join(data_dir, 'schema.json')
+    schema_path = os.path.join(model_dir, 'schema.json') if model_dir else None
+    if not schema_path or not os.path.exists(schema_path):
+        schema_path = os.path.join(data_dir, 'schema.json')
     logging.info("Using schema: %s", schema_path)
 
-    # Read seq_max_lens from train_config if available (next to schema)
-    train_config_path = os.path.join(data_dir, 'train_config.json')
+    # Read seq_max_lens from train_config if available
+    train_config_path = os.path.join(model_dir, 'train_config.json') if model_dir else None
+    if not train_config_path or not os.path.exists(train_config_path):
+        train_config_path = os.path.join(data_dir, 'train_config.json')
+    if not os.path.exists(train_config_path):
+        train_config_path = None
     sml_str = _FALLBACK_SEQ_MAX_LENS
     batch_size = _FALLBACK_BATCH_SIZE
-    if os.path.exists(train_config_path):
+    if train_config_path and os.path.exists(train_config_path):
         try:
             with open(train_config_path) as f:
                 tc = json.load(f)
