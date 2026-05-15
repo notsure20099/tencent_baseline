@@ -19,6 +19,7 @@ Environment variables:
 
 import os
 import json
+import gc
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -379,7 +380,7 @@ def main() -> None:
         logging.info(f"Using EVAL_BATCH_SIZE={batch_size} (overriding training config)")
     else:
         batch_size = int(train_config.get('batch_size', _FALLBACK_BATCH_SIZE))
-    num_workers = int(os.environ.get('EVAL_NUM_WORKERS', '0'))
+    num_workers = int(os.environ.get('EVAL_NUM_WORKERS', str(train_config.get('num_workers', _FALLBACK_NUM_WORKERS))))
     logging.info(f"Using num_workers={num_workers}")
 
     test_dataset = PCVRParquetDataset(
@@ -470,6 +471,12 @@ def main() -> None:
         raise e
 
     logging.info(f"Inference complete: {len(all_probs)} predictions")
+
+    # Explicitly clean up DataLoader workers to prevent hanging
+    del test_loader
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     predictions = {
         "predictions": dict(zip(all_user_ids, all_probs)),
