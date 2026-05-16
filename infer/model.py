@@ -258,6 +258,10 @@ class CrossAttention(nn.Module):
     When ``use_item_bridge=True``, an item-identity gate is fused into Q so
     that cross-attention focuses on sequence events relevant to the current
     item being predicted.
+
+    When ``use_time_bias=True``, a learnable per-time-bucket scalar bias is
+    added to attention scores so that more recent sequence events naturally
+    receive higher attention.
     """
 
     def __init__(
@@ -895,6 +899,61 @@ def create_sequence_encoder(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Item Gate Module — S-tier item × domain cross interaction
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class ItemGateModule(nn.Module):
+    """Item-aware gating with cross interaction per domain.
+
+    Crosses item S-tier token representation with each domain's query
+    tokens, producing a per-domain gate scalar and cross fusion vector.
+
+    The gate is initialized to zero so the module starts as identity,
+    and the model learns which domains benefit from item-aware biasing.
+    """
+
+    def __init__(self, d_model: int, num_domains: int):
+        super().__init__()
+        self.num_domains = num_domains
+        # Per-domain cross fusion: Linear(2D → D)
+        self.cross = nn.ModuleList([
+            nn.Linear(d_model * 2, d_model) for _ in range(num_domains)
+        ])
+        # Per-domain gate: Linear(2D → 1) → sigmoid
+        self.gate = nn.ModuleList([
+            nn.Linear(d_model * 2, 1) for _ in range(num_domains)
+        ])
+        # Initialize gates to zero so module starts as identity (safe)
+        for g in self.gate:
+            nn.init.zeros_(g.weight)
+            nn.init.zeros_(g.bias)
+
+    def forward(
+        self,
+        item_token: torch.Tensor,
+        domain_tokens: torch.Tensor,
+        domain_idx: int,
+    ) -> torch.Tensor:
+        """Crosses item token with domain tokens via gated fusion.
+
+        Args:
+            item_token: (B, 1, D) pooled item S-tier representation.
+            domain_tokens: (B, N, D) one domain's tokens.
+            domain_idx: which domain (0..num_domains-1).
+
+        Returns:
+            Enhanced domain tokens of shape (B, N, D).
+        """
+        B, N, D = domain_tokens.shape
+        item_exp = item_token.expand(-1, N, -1)               # (B, N, D)
+        concat = torch.cat([item_exp, domain_tokens], dim=-1)  # (B, N, 2D)
+        g = self.gate[domain_idx](concat).sigmoid()            # (B, N, 1)
+        c = self.cross[domain_idx](concat)                     # (B, N, D)
+        return domain_tokens + g * c                           # residual
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HyFormer Blocks
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -927,13 +986,15 @@ class MultiSeqHyFormerBlock(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        use_item_gate: bool = False,
+        num_item_s_tokens: int = 0,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
         self.num_queries = num_queries
         self.num_ns = num_ns
+        self.use_item_gate = use_item_gate
 
-        # Independent sequence encoder per sequence
         self.seq_encoders = nn.ModuleList([
             create_sequence_encoder(
                 encoder_type=seq_encoder_type,
@@ -947,7 +1008,6 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
-        # Independent cross-attention per sequence
         self.cross_attns = nn.ModuleList([
             CrossAttention(
                 d_model=d_model,
@@ -961,7 +1021,6 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
-        # RankMixer: input token count = Nq * S + Nns
         n_total = num_queries * num_sequences + num_ns
         self.mixer = RankMixerBlock(
             d_model=d_model,
@@ -970,6 +1029,9 @@ class MultiSeqHyFormerBlock(nn.Module):
             dropout=dropout,
             mode=rank_mixer_mode
         )
+
+        if use_item_gate and num_item_s_tokens > 0:
+            self.item_gate = ItemGateModule(d_model=d_model, num_domains=num_sequences)
 
     def forward(
         self,
@@ -981,6 +1043,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         rope_sin_list: Optional[List[torch.Tensor]] = None,
         item_tokens: Optional[torch.Tensor] = None,
         seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+        item_s_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[list, torch.Tensor, list, list]:
         """Processes one multi-sequence HyFormer block step.
 
@@ -1018,6 +1081,14 @@ class MultiSeqHyFormerBlock(nn.Module):
             next_seq_i, mask_i = result
             next_seqs.append(next_seq_i)
             next_masks.append(mask_i)
+
+        # 1.5 Item Gate: cross item S-tier tokens with each sequence's Q tokens
+        if hasattr(self, 'item_gate') and item_s_tokens is not None:
+            item_pooled = item_s_tokens.mean(dim=1, keepdim=True)  # (B, 1, D)
+            q_tokens_list = [
+                self.item_gate(item_pooled, q_tokens_list[i], i)
+                for i in range(S)
+            ]
 
         # 2. Independent Query Decoding per sequence
         decoded_qs = []
@@ -1303,6 +1374,8 @@ class PCVRHyFormer(nn.Module):
         dense_token_groups: int = 1,
         dense_aware_qgen: bool = False,
         use_time_bias: bool = False,
+        use_item_gate: bool = False,
+        num_item_s_tokens: int = 0,
     ) -> None:
         super().__init__()
 
@@ -1483,6 +1556,8 @@ class PCVRHyFormer(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                use_item_gate=use_item_gate,
+                num_item_s_tokens=num_item_s_tokens,
             )
             for _ in range(num_hyformer_blocks)
         ])
@@ -1691,6 +1766,7 @@ class PCVRHyFormer(nn.Module):
         apply_dropout: bool = True,
         item_tokens: Optional[torch.Tensor] = None,
         seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+        item_s_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Runs the multi-sequence block stack with dropout and output projection."""
         if apply_dropout:
@@ -1725,6 +1801,7 @@ class PCVRHyFormer(nn.Module):
                 rope_sin_list=rope_sin_list,
                 item_tokens=item_tokens,
                 seq_time_buckets_list=seq_time_buckets_list,
+                item_s_tokens=item_s_tokens,
             )
 
         # Output: concatenate all sequences' Q tokens then project via MLP
@@ -1742,6 +1819,11 @@ class PCVRHyFormer(nn.Module):
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)   # (B, num_item_groups, D)
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
+
+        # S-tier item tokens for ItemGate cross interaction
+        item_s_tokens = None
+        if self.use_item_gate and self.num_item_s_tokens > 0:
+            item_s_tokens = item_ns[:, :self.num_item_s_tokens, :]  # (B, Ns, D)
 
         dense_tokens = None
         ns_parts = [user_ns]
@@ -1782,6 +1864,7 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=self.training,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
+            item_s_tokens=item_s_tokens,
         )
 
         # 5. Classifier
@@ -1795,6 +1878,10 @@ class PCVRHyFormer(nn.Module):
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
+
+        item_s_tokens = None
+        if self.use_item_gate and self.num_item_s_tokens > 0:
+            item_s_tokens = item_ns[:, :self.num_item_s_tokens, :]
 
         dense_tokens = None
         ns_parts = [user_ns]
@@ -1832,6 +1919,7 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=False,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
+            item_s_tokens=item_s_tokens,
         )
 
         logits = self.clsfier(output)
