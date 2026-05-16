@@ -25,4 +25,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --dense_aware_qgen \
     --use_time_bias \
     --use_item_gate \
+    --use_item_seq_shortcut \
     "$@"

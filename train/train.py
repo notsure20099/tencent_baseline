@@ -139,6 +139,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--use_item_gate', action='store_true', default=False,
                         help='Enable ItemGateModule: 5x4 per-fid per-domain '
                              'independent cross interaction (no pooling)')
+    parser.add_argument('--use_item_seq_shortcut', action='store_true', default=False,
+                        help='Enable ItemSeqCrossShortcut: cross item S-tier '
+                             'with raw seq tokens → pooled shortcut injected '
+                             'at classifier entry (bypasses CrossAttention)')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixerBlock mode: '
@@ -333,6 +337,7 @@ def main() -> None:
         "use_time_bias": args.use_time_bias,
         "use_item_gate": args.use_item_gate,
         "num_item_s_tokens": max(0, len(item_ns_groups) - 1),
+        "use_item_seq_shortcut": args.use_item_seq_shortcut,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

@@ -585,6 +585,23 @@ class PCVRHyFormerRankingTrainer:
                     logging.info(f"[Param] igate fid{fid_j} gate_norms: {' '.join(gate_vals)}")
                     logging.info(f"[Param] igate fid{fid_j} cross_norms: {' '.join(cross_vals)}")
 
+        if hasattr(raw, 'seq_shortcut') and raw.seq_shortcut is not None:
+            sc = raw.seq_shortcut
+            for fid_j in range(sc.num_item_tokens):
+                gate_vals = []
+                cross_vals = []
+                for k in range(sc.num_domains):
+                    gate_vals.append(f"d{k}={float(sc.gate[fid_j][k].weight.norm()):+.4f}")
+                    cross_vals.append(f"d{k}={float(sc.cross[fid_j][k].weight.norm()):+.4f}")
+                logging.info(f"[Param] scut fid{fid_j} gate_norms: {' '.join(gate_vals)}")
+                logging.info(f"[Param] scut fid{fid_j} cross_norms: {' '.join(cross_vals)}")
+            scp_norm = float(sc.shortcut_proj.weight.norm())
+            logging.info(f"[Param] scut shortcut_proj norm={scp_norm:.4f}")
+
+        if hasattr(raw, 's_gate') and raw.s_gate is not None:
+            logging.info(f"[Param] scut entry gate_norm={float(raw.s_gate.weight.norm()):+.4f} "
+                         f"cross_norm={float(raw.s_cross.weight.norm()):+.4f}")
+
         if hasattr(raw, 'blocks'):
             for bi, block in enumerate(raw.blocks):
                 mixer = block.mixer

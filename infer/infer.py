@@ -74,6 +74,7 @@ _FALLBACK_MODEL_CFG = {
     'use_time_bias': False,
     'use_item_gate': False,
     'num_item_s_tokens': 0,
+    'use_item_seq_shortcut': False,
 }
 
 _FALLBACK_SEQ_MAX_LENS = 'seq_a:256,seq_b:256,seq_c:512,seq_d:512'

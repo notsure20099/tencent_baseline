@@ -947,6 +947,55 @@ class ItemGateModule(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Item-Seq Cross Shortcut — cross item S-tier with raw seq → pool → shortcut
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class ItemSeqCrossShortcut(nn.Module):
+    """Cross item S-tier tokens with raw sequence tokens, pool per domain,
+    then project into a single shortcut vector injected at the classifier entry.
+
+    Physically isolated from CrossAttention — no gradient competition with
+    time_bias.  Gradient path: 6 steps vs time_bias 2 steps (decay ratio ~3×).
+    """
+
+    def __init__(self, d_model: int, num_item_tokens: int, num_domains: int):
+        super().__init__()
+        self.num_domains = num_domains
+        self.num_item_tokens = num_item_tokens
+        self.gate = nn.ModuleList([
+            nn.ModuleList([nn.Linear(d_model * 2, 1) for _ in range(num_domains)])
+            for _ in range(num_item_tokens)
+        ])
+        self.cross = nn.ModuleList([
+            nn.ModuleList([nn.Linear(d_model * 2, d_model) for _ in range(num_domains)])
+            for _ in range(num_item_tokens)
+        ])
+        for fid_j in range(num_item_tokens):
+            for k in range(num_domains):
+                nn.init.zeros_(self.gate[fid_j][k].weight)
+                nn.init.zeros_(self.gate[fid_j][k].bias)
+                nn.init.zeros_(self.cross[fid_j][k].weight)
+                nn.init.zeros_(self.cross[fid_j][k].bias)
+        self.shortcut_proj = nn.Linear(num_domains * d_model, d_model)
+
+    def forward(self, item_s, seq_tokens_list):
+        domain_vecs = []
+        for k in range(self.num_domains):
+            seq_k = seq_tokens_list[k]
+            _, Lk, _ = seq_k.shape
+            result = seq_k
+            for fid_j in range(self.num_item_tokens):
+                item_j = item_s[:, fid_j, :].unsqueeze(1).expand(-1, Lk, -1)
+                concat = torch.cat([item_j, result], dim=-1)
+                g = self.gate[fid_j][k](concat).sigmoid()
+                c = self.cross[fid_j][k](concat)
+                result = result + g * c
+            domain_vecs.append(result.mean(dim=1))
+        return self.shortcut_proj(torch.cat(domain_vecs, dim=-1))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HyFormer Blocks
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1369,6 +1418,7 @@ class PCVRHyFormer(nn.Module):
         use_time_bias: bool = False,
         use_item_gate: bool = False,
         num_item_s_tokens: int = 0,
+        use_item_seq_shortcut: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1387,6 +1437,7 @@ class PCVRHyFormer(nn.Module):
         self.use_time_bias = use_time_bias
         self.use_item_gate = use_item_gate
         self.num_item_s_tokens = num_item_s_tokens
+        self.use_item_seq_shortcut = use_item_seq_shortcut
 
         # ================== NS Tokens Construction ==================
 
@@ -1558,6 +1609,14 @@ class PCVRHyFormer(nn.Module):
         ])
         self.use_item_bridge = use_item_bridge
 
+        # ================== Item-Seq Cross Shortcut ==================
+        if use_item_seq_shortcut and num_item_s_tokens > 0:
+            self.seq_shortcut = ItemSeqCrossShortcut(
+                d_model=d_model, num_item_tokens=num_item_s_tokens,
+                num_domains=self.num_sequences)
+        else:
+            self.seq_shortcut = None
+
         # ================== RoPE ==================
         if use_rope:
             head_dim = d_model // num_heads
@@ -1582,6 +1641,18 @@ class PCVRHyFormer(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(d_model, action_num)
         )
+
+        # Classifier-entry gate+cross for seq_shortcut fusion
+        if use_item_seq_shortcut and num_item_s_tokens > 0:
+            self.s_gate = nn.Linear(d_model * 2, 1)
+            self.s_cross = nn.Linear(d_model * 2, d_model)
+            nn.init.zeros_(self.s_gate.weight)
+            nn.init.zeros_(self.s_gate.bias)
+            nn.init.zeros_(self.s_cross.weight)
+            nn.init.zeros_(self.s_cross.bias)
+        else:
+            self.s_gate = None
+            self.s_cross = None
 
         # Initialize parameters
         self._init_params()
@@ -1861,6 +1932,14 @@ class PCVRHyFormer(nn.Module):
             item_s_tokens=item_s_tokens,
         )
 
+        # 4.5 Item-Seq Cross Shortcut: cross with raw seq, inject at clsfier entry
+        if self.seq_shortcut is not None and item_s_tokens is not None:
+            s_short = self.seq_shortcut(item_s_tokens, seq_tokens_list)
+            concat = torch.cat([output, s_short], dim=-1)
+            g = self.s_gate(concat).sigmoid()
+            c = self.s_cross(concat)
+            output = output + g * c
+
         # 5. Classifier (forward)
         logits = self.clsfier(output)  # (B, action_num)
         return logits
@@ -1915,6 +1994,13 @@ class PCVRHyFormer(nn.Module):
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
             item_s_tokens=item_s_tokens,
         )
+
+        if self.seq_shortcut is not None and item_s_tokens is not None:
+            s_short = self.seq_shortcut(item_s_tokens, seq_tokens_list)
+            concat = torch.cat([output, s_short], dim=-1)
+            g = self.s_gate(concat).sigmoid()
+            c = self.s_cross(concat)
+            output = output + g * c
 
         logits = self.clsfier(output)
         return logits, output

@@ -314,20 +314,33 @@ Exp38d-A: 两阶段训练 — 冻结 time_bias E1-E2
   判定:        ✗ 假说被推翻。瓶颈不在梯度竞争，在信息压缩。
 
 ═══════════════════════════════════════════════════════════════════════════════
-Exp38e: 5×4 per-fid per-domain 全交叉 (规划)
+Exp38e: 5×4 per-fid per-domain 全交叉 + Item-Seq Cross Shortcut
 ═══════════════════════════════════════════════════════════════════════════════
-  日期:        2026-05-17（规划）
+  日期:        2026-05-17
+  分支:        exp38e_5x4 (基于 Exp29)
   背景:        Exp38b/c/d-A 三个实验确认: 5→1 pooling (无论 mean 还是 attention)
                是唯一瓶颈。5 个 S-tier item token (fid=5/6/7+12/8/9+10) 语义不同、
                AUC 区间不同，被压缩成 1 个向量时损失了所有差异信息。
-  目标:        每个 S-tier token 独立与 4 个序列域交互
-  方案:        5 fid × 4 domain = 20 条独立交叉路径
-               每条路径: 独立 gate(128→1) + cross(128→64)
-               每个 block 新增: 20 × (8256 + 129) ≈ 168K 参数
-  预期:        不同 fid 对不同域有不同的贡献度
-               例如 fid=8(低覆盖独特特征)可能对 seq_b 大贡献、对 seq_a 无贡献
-  分支:        待建
-  状态:        规划中
+  改动:
+     (1) ItemGateModule: 5×4 per-fid per-domain 独立交叉 (20条路径)
+         每条路径: Linear(128→1) gate + Linear(128→64) cross
+         per block ~168K 参数
+     (2) ItemSeqCrossShortcut: 新增短路模块
+         - item S-tier 与 raw seq tokens 交叉 (在 embedding 后的原始序列上)
+         - per-domain pool → shortcut proj (4×64→64)
+         - 注入点: 分类器入口 (output_proj 之后、clsfier 之前)
+         - 与 time_bias 物理隔离 — 绕开 CrossAttention
+         - 梯度路径: 6 步 vs time_bias 2 步 (衰减比 ~3×)
+         - ~184K 额外参数
+     (3) 分类器入口融合: s_gate(128→1) + s_cross(128→64)
+         concat(h_main, s_shortcut) → gated residual
+     (4) 监控: scut fid{j} gate/cross norms + entry gate/cross norms
+  总新增参数: ~520K (ItemGate 336K + Shortcut 184K)
+  关键假设:
+    - 5×4 让每个 fid 独立发言 → 打破 5→1 pool 信息瓶颈
+    - 短路让 item↔seq 交叉结果绕过 CrossAttn/时间信号垄断
+    - 两条线在分类器入口会师 → loss 自然分配梯度
+  状态:        训练中
 
 ═══════════════════════════════════════════════════════════════════════════════
 经验教训
