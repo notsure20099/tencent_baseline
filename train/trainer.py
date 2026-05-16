@@ -578,9 +578,12 @@ class PCVRHyFormerRankingTrainer:
             if hasattr(raw.blocks[0], 'item_gate'):
                 ig = raw.blocks[0].item_gate
                 gate_vals = []
-                for di, g in enumerate(ig.gate):
-                    gate_vals.append(f"d{di}={float(g.weight.norm()):+.4f}")
+                cross_vals = []
+                for di in range(len(ig.gate)):
+                    gate_vals.append(f"d{di}={float(ig.gate[di].weight.norm()):+.4f}")
+                    cross_vals.append(f"d{di}={float(ig.cross[di].weight.norm()):+.4f}")
                 logging.info(f"[Param] item_gate gate_norms: {' '.join(gate_vals)}")
+                logging.info(f"[Param] item_gate cross_norms: {' '.join(cross_vals)}")
 
         if hasattr(raw, 'blocks'):
             for bi, block in enumerate(raw.blocks):
