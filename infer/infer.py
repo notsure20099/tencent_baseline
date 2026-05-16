@@ -227,7 +227,7 @@ def build_model(
         dataset.item_int_schema, dataset.item_int_vocab_sizes)
 
     logging.info(f"Building PCVRHyFormer with cfg: {model_cfg}")
-    model_cfg.setdefault('num_item_s_tokens', max(0, len(item_ns_groups) - 1))
+    model_cfg['num_item_s_tokens'] = max(0, len(item_ns_groups) - 1)
     model = PCVRHyFormer(
         user_int_feature_specs=user_int_feature_specs,
         item_int_feature_specs=item_int_feature_specs,
