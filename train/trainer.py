@@ -571,15 +571,21 @@ class PCVRHyFormerRankingTrainer:
 
     def _freeze_time_bias(self) -> None:
         raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+        count = 0
         for name, param in raw.named_parameters():
             if 'temporal_bias' in name:
                 param.requires_grad = False
+                count += 1
+        logging.info(f"Exp38d-A: froze {count} temporal_bias parameters")
 
     def _unfreeze_time_bias(self) -> None:
         raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+        count = 0
         for name, param in raw.named_parameters():
             if 'temporal_bias' in name:
                 param.requires_grad = True
+                count += 1
+        logging.info(f"Exp38d-A: unfroze {count} temporal_bias parameters")
 
     @torch.no_grad()
     def _log_param_stats(self, epoch: int) -> None:
