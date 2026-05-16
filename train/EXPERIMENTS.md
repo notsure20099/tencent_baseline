@@ -264,10 +264,56 @@ Exp38c: ItemGate v2 — attention pooling 替代 mean pooling
   改动:        ItemGateModule: mean(5→1) → softmax attention(可学习权重)
                + 每个fid不同的 attention 权重 → per-sample 自适应选择
                trainer.py 新增 attn_norm 监控
-  假设:        Exp38b gate 在 E4 饱和因为 mean 等权压平了5个fid的信号差异
-               Exp38c 让模型自己选"这个样本上该听fid=5还是fid=8"
-  预期:        Gate 继续增长超过 0.25 → 证明 attention 释放了被压制的信息
-  状态:        训练中
+  结果:
+    Valid AUC: E9=0.86763 (历史最高，+0.00029 vs Exp38b)
+    Test AUC:  **0.847299** (与 Exp38b 完全同等，差异 +0.000002)
+  参数轨迹 (全 epoch):
+    gate d0:   E1=0.301 → E2=0.372 → E9=0.370     E2冻结
+    gate d1-3: E1≈0.13 → E2≈0.16 → E9≈0.16       E2冻结
+    cross:     E1=0.54  → E2=0.61  → E9=0.63      慢(+3% over E2→E9)
+    attn:      E1=0.084 → E2=0.094 → E9=0.095     完全冻结
+    ns_user:   E1=5.1   → E2=5.27  → E9=5.27      完全冻结
+    time_bias: E1=5.0   → E2=7.3   → E9=16~23     +167% 持续暴涨
+    noise(U_n):E1=4.88  → E2=4.93  → E9=4.93      四实验连续验证噪音组冻结最早
+  核心发现:
+    - E1→E2 是所有模块的"黄金窗口期"——gate+24%, cross+13%, attn+12%
+      E2 之后梯度分配彻底失衡，只有 time_bias 持续学习
+    - attention pooling 完全没学到 per-sample 自适应 (attn 在 E2 冻在 0.094)
+    - cross 层在 E2→E9 期间缓慢爬行 (+3%)，但速度不足以产生 Test 差异
+    - E4 AUC 倒跌 (0.86721→0.86696) 同时 logloss 降 ——
+      time_bias 过度适应容易样本、无法排序困难样本的典型表现
+    - 参数量: ItemGate 67K params vs time_bias 2K params (32倍)
+      但梯度衰减系数: ItemGate≈0.001, time_bias≈1.0 (800倍差距)
+      等效参数比: time_bias 2,080 : ItemGate 81
+  假设验证:
+    attention pooling 并非瓶颈 → Exp38c 与 Exp38b 在 Test 上完全同等
+    ✓ 真正瓶颈: 梯度传播路径长度不对等
+  判定:        → 与 Exp38b 同等。无增益。梯度不平等是唯一待解瓶颈。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp38d 规划: 梯度平权 — 两阶段训练 / 路径缩短
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-16（规划）
+  背景:        Exp38b/c 系列验证了 ItemGate 方向正确（Test +0.00003），
+               但 gate/cross 在 E2 后冻结，根源是 time_bias(2步梯度) 与
+               ItemGate(9步梯度) 的梯度衰减系数差≈800倍，形成梯度垄断。
+  目标:        打破梯度不平等，让 ItemGate 获得正向学习动力
+  方案 A (两阶段训练):
+     E1-E2 冻结 time_bias (requires_grad=False)，让 ItemGate 先行发育
+     E3+ 解冻，正常联合训练
+     改动: trainer.py ~5行
+     验证: gate 能否在隔离期间跨过当前天花板 (d0: 0.19→0.37)
+  方案 B (路径缩短):
+     ItemGate 注入点从 CrossAttention 前移到后
+     item → ... → cross → 直接注入 decoded_Q token → RankMixer
+     梯度路径从 9步→5步，与 time_bias 物理隔离
+     改动: model.py ~15行
+  方案 C (5×4 全交叉):
+     per-fid × per-domain 独立交叉，20条路径
+     仅在 A+B 成立后做，风险递进
+  推荐执行顺序: A → B → C
+  分支:        待建 (exp38d_gradient_fairness)
+  状态:        规划中
 
 ═══════════════════════════════════════════════════════════════════════════════
 经验教训
@@ -293,7 +339,14 @@ Exp38c: ItemGate v2 — attention pooling 替代 mean pooling
   15.（Exp38b）Item Gate 方向正确——20+实验中首次超越 Exp29 基线(+0.00003)。
       S-tier item 特征的跨域交叉有价值，但 mean pooling + 标量 gate 限制了增益。
   16.（Exp38b）time_bias 是当前唯一持续活跃的参数线(E4→E6 norm 10→12)，
-      模型边际收益几乎全部来自时间信号的深化利用。内容信号路径仍需优化。
+       模型边际收益几乎全部来自时间信号的深化利用。内容信号路径仍需优化。
+  17.（Exp38c）attention pooling 并未改善 per-sample 自适应——attn 参数
+       在 E2 就冻结于 0.094，后续 7 个 epoch 完全不动。
+  18.（Exp38c）E1→E2 是所有模块唯一的"黄金窗口期"——此后梯度被 time_bias 垄断。
+  19.（Exp38c）gate d0=0.37 是时间竞争下的最优值，不是真正的饱和——
+       ItemGate 停不是因为容量不够，而是梯度传不回来。
+  20.（Exp38 系列）梯度不平等是唯一瓶颈：time_bias 2步梯度 vs ItemGate 9步梯度，
+       衰减系数差距≈800倍。67K参数被2K参数碾压在梯度赛道上。
 
 ═══════════════════════════════════════════════════════════════════════════════
 Exp38 规划: NS 消融实验 — 噪音压缩（噪音 vs 宝藏判定）
