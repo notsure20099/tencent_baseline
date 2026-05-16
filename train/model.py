@@ -899,6 +899,54 @@ def create_sequence_encoder(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Item Gate Module — 5×4 per-fid per-domain independent cross interaction
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class ItemGateModule(nn.Module):
+    """Per-fid per-domain gated cross fusion. No pooling.
+
+    Each S-tier item token independently interacts with each domain's Q tokens
+    through its own gate and cross layers. 5 fids × 4 domains = 20 independent
+    interaction paths, avoiding the information bottleneck from mean/attention
+    pooling discovered in Exp38b/c/d-A.
+    """
+
+    def __init__(self, d_model: int, num_domains: int, num_item_tokens: int):
+        super().__init__()
+        self.num_domains = num_domains
+        self.num_item_tokens = num_item_tokens
+        # Per-fid per-domain: gate[fid_j][domain_k]
+        self.gate = nn.ModuleList([
+            nn.ModuleList([nn.Linear(d_model * 2, 1) for _ in range(num_domains)])
+            for _ in range(num_item_tokens)
+        ])
+        self.cross = nn.ModuleList([
+            nn.ModuleList([nn.Linear(d_model * 2, d_model) for _ in range(num_domains)])
+            for _ in range(num_item_tokens)
+        ])
+        for fid_j in range(num_item_tokens):
+            for k in range(num_domains):
+                nn.init.zeros_(self.gate[fid_j][k].weight)
+                nn.init.zeros_(self.gate[fid_j][k].bias)
+                nn.init.zeros_(self.cross[fid_j][k].weight)
+                nn.init.zeros_(self.cross[fid_j][k].bias)
+
+    def forward(self, item_tokens, domain_tokens, domain_idx):
+        B, Ns, D = item_tokens.shape
+        _, N, _ = domain_tokens.shape
+        result = domain_tokens
+        for fid_j in range(Ns):
+            item_j = item_tokens[:, fid_j, :]
+            item_exp = item_j.unsqueeze(1).expand(-1, N, -1)
+            concat = torch.cat([item_exp, result], dim=-1)
+            g = self.gate[fid_j][domain_idx](concat).sigmoid()
+            c = self.cross[fid_j][domain_idx](concat)
+            result = result + g * c
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HyFormer Blocks
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -931,6 +979,8 @@ class MultiSeqHyFormerBlock(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        use_item_gate: bool = False,
+        num_item_s_tokens: int = 0,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -972,6 +1022,11 @@ class MultiSeqHyFormerBlock(nn.Module):
             mode=rank_mixer_mode
         )
 
+        if use_item_gate and num_item_s_tokens > 0:
+            self.item_gate = ItemGateModule(
+                d_model=d_model, num_domains=num_sequences,
+                num_item_tokens=num_item_s_tokens)
+
     def forward(
         self,
         q_tokens_list: list,
@@ -982,6 +1037,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         rope_sin_list: Optional[List[torch.Tensor]] = None,
         item_tokens: Optional[torch.Tensor] = None,
         seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+        item_s_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[list, torch.Tensor, list, list]:
         """Processes one multi-sequence HyFormer block step.
 
@@ -1019,6 +1075,13 @@ class MultiSeqHyFormerBlock(nn.Module):
             next_seq_i, mask_i = result
             next_seqs.append(next_seq_i)
             next_masks.append(mask_i)
+
+        # 1.5 Item Gate: per-fid per-domain independent cross with Q tokens
+        if hasattr(self, 'item_gate') and item_s_tokens is not None:
+            q_tokens_list = [
+                self.item_gate(item_s_tokens, q_tokens_list[i], i)
+                for i in range(S)
+            ]
 
         # 2. Independent Query Decoding per sequence
         decoded_qs = []
@@ -1304,6 +1367,8 @@ class PCVRHyFormer(nn.Module):
         dense_token_groups: int = 1,
         dense_aware_qgen: bool = False,
         use_time_bias: bool = False,
+        use_item_gate: bool = False,
+        num_item_s_tokens: int = 0,
     ) -> None:
         super().__init__()
 
@@ -1320,6 +1385,8 @@ class PCVRHyFormer(nn.Module):
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
         self.use_time_bias = use_time_bias
+        self.use_item_gate = use_item_gate
+        self.num_item_s_tokens = num_item_s_tokens
 
         # ================== NS Tokens Construction ==================
 
@@ -1484,6 +1551,8 @@ class PCVRHyFormer(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                use_item_gate=use_item_gate,
+                num_item_s_tokens=num_item_s_tokens,
             )
             for _ in range(num_hyformer_blocks)
         ])
@@ -1692,6 +1761,7 @@ class PCVRHyFormer(nn.Module):
         apply_dropout: bool = True,
         item_tokens: Optional[torch.Tensor] = None,
         seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+        item_s_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Runs the multi-sequence block stack with dropout and output projection."""
         if apply_dropout:
@@ -1726,6 +1796,7 @@ class PCVRHyFormer(nn.Module):
                 rope_sin_list=rope_sin_list,
                 item_tokens=item_tokens,
                 seq_time_buckets_list=seq_time_buckets_list,
+                item_s_tokens=item_s_tokens,
             )
 
         # Output: concatenate all sequences' Q tokens then project via MLP
@@ -1743,6 +1814,10 @@ class PCVRHyFormer(nn.Module):
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)   # (B, num_item_groups, D)
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
+
+        item_s_tokens = None
+        if self.use_item_gate and self.num_item_s_tokens > 0:
+            item_s_tokens = item_ns[:, :self.num_item_s_tokens, :]  # (B, Ns, D)
 
         dense_tokens = None
         ns_parts = [user_ns]
@@ -1783,9 +1858,10 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=self.training,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
+            item_s_tokens=item_s_tokens,
         )
 
-        # 5. Classifier
+        # 5. Classifier (forward)
         logits = self.clsfier(output)  # (B, action_num)
         return logits
 
@@ -1796,6 +1872,10 @@ class PCVRHyFormer(nn.Module):
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
+
+        item_s_tokens = None
+        if self.use_item_gate and self.num_item_s_tokens > 0:
+            item_s_tokens = item_ns[:, :self.num_item_s_tokens, :]
 
         dense_tokens = None
         ns_parts = [user_ns]
@@ -1833,6 +1913,7 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=False,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
+            item_s_tokens=item_s_tokens,
         )
 
         logits = self.clsfier(output)

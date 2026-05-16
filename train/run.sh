@@ -3,7 +3,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp38e_5x4: 5 fid × 4 domain per-fid per-domain independent cross
+#    No pooling — each S-tier item token independently crosses with
+#    each sequence domain via its own gate + cross layers.
+#  Baseline Exp29 (PerHeadTimeBias).
+#  20 independent interaction paths per block (5 fids × 4 domains).
+#  d_model=64, T=17 → ffn_only. Full epoch-end monitoring enabled.
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -19,4 +24,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --dense_token_groups 4 \
     --dense_aware_qgen \
     --use_time_bias \
+    --use_item_gate \
     "$@"
