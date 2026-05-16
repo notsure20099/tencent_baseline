@@ -1392,6 +1392,8 @@ class PCVRHyFormer(nn.Module):
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
         self.use_time_bias = use_time_bias
+        self.use_item_gate = use_item_gate
+        self.num_item_s_tokens = num_item_s_tokens
 
         # ================== NS Tokens Construction ==================
 
