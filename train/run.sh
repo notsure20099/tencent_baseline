@@ -3,7 +3,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp38d_GradientFairness: two-stage training
+#    Stage 1 (E1-E2): time_bias frozen, ItemGate develops freely
+#    Stage 2 (E3+):   time_bias unfrozen, joint training
+#  Baseline Exp29. Architecture same as Exp38c (ItemGate + attention pool).
+#  d_model=64, T=17 → ffn_only. Full epoch-end monitoring enabled.
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -19,4 +23,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --dense_token_groups 4 \
     --dense_aware_qgen \
     --use_time_bias \
+    --use_item_gate \
     "$@"
