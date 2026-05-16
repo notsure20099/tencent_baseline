@@ -3,7 +3,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp38c_ItemGate_v2: user noise compress + item S-tier independent groups
+#                      + ItemGateModule with attention pooling (replaces mean)
+#  Baseline Exp29 (PerHeadTimeBias).
+#  d_model=64, T=17 → ffn_only. Epoch-end param + gate/attn monitoring enabled.
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -19,4 +22,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --dense_token_groups 4 \
     --dense_aware_qgen \
     --use_time_bias \
+    --use_item_gate \
     "$@"

@@ -136,6 +136,9 @@ def parse_args() -> argparse.Namespace:
                         help='Add learnable per-time-bucket scalar bias to '
                              'CrossAttention scores so that recent events '
                              'naturally receive higher attention')
+    parser.add_argument('--use_item_gate', action='store_true', default=False,
+                        help='Enable ItemGateModule: S-tier item tokens cross '
+                             'each domain\'s Q tokens via attention-pooled gated fusion')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixerBlock mode: '
@@ -328,6 +331,8 @@ def main() -> None:
         "dense_token_groups": args.dense_token_groups,
         "dense_aware_qgen": args.dense_aware_qgen,
         "use_time_bias": args.use_time_bias,
+        "use_item_gate": args.use_item_gate,
+        "num_item_s_tokens": max(0, len(item_ns_groups) - 1),
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
