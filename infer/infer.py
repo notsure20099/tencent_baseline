@@ -248,6 +248,8 @@ def load_model_state_strict(
     with a diagnostic message.
     """
     state_dict = torch.load(ckpt_path, map_location=device)
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        state_dict = {k.removeprefix('_orig_mod.'): v for k, v in state_dict.items()}
     try:
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as e:
