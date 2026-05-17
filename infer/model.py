@@ -1101,16 +1101,20 @@ class GroupNSTokenizer(nn.Module):
             for group in groups
         ])
 
-    def forward(self, int_feats: torch.Tensor) -> torch.Tensor:
+    def forward(self, int_feats: torch.Tensor,
+                return_raw_embeddings: bool = False):
         """Embeds and projects grouped discrete features into NS tokens.
 
         Args:
             int_feats: (B, total_int_dim), concatenated integer features.
+            return_raw_embeddings: if True, also return per-fid raw embeddings.
 
         Returns:
-            Tokens of shape (B, num_groups, D).
+            Tokens of shape (B, num_groups, D), or
+            ((B, num_groups, D), list of (B, emb_dim)) if return_raw_embeddings.
         """
         tokens = []
+        all_raw = []
         for group, proj in zip(self.groups, self.group_projs):
             fid_embs = []
             for fid_idx in group:
@@ -1132,9 +1136,14 @@ class GroupNSTokenizer(nn.Module):
                         count = mask.sum(dim=1).clamp(min=1)  # (B, 1)
                         fid_emb = (emb_all * mask).sum(dim=1) / count  # (B, emb_dim)
                 fid_embs.append(fid_emb)
+                if return_raw_embeddings:
+                    all_raw.append(fid_emb)
             cat_emb = torch.cat(fid_embs, dim=-1)  # (B, num_fids*emb_dim)
             tokens.append(F.silu(proj(cat_emb)).unsqueeze(1))  # (B, 1, D)
-        return torch.cat(tokens, dim=1)  # (B, num_groups, D)
+        tokens_out = torch.cat(tokens, dim=1)  # (B, num_groups, D)
+        if return_raw_embeddings:
+            return tokens_out, all_raw
+        return tokens_out
 
 
 class RankMixerNSTokenizer(nn.Module):
@@ -1215,14 +1224,17 @@ class RankMixerNSTokenizer(nn.Module):
             f"num_ns_tokens={num_ns_tokens}, pad={self._pad_size}"
         )
 
-    def forward(self, int_feats: torch.Tensor) -> torch.Tensor:
+    def forward(self, int_feats: torch.Tensor,
+                return_raw_embeddings: bool = False):
         """Embeds all features, concatenates, splits, and projects.
 
         Args:
             int_feats: (B, total_int_dim) concatenated integer features.
+            return_raw_embeddings: if True, also return per-fid raw embeddings.
 
         Returns:
-            (B, num_ns_tokens, d_model) tensor.
+            (B, num_ns_tokens, d_model) tensor, or
+            ((B, num_ns_tokens, d_model), list of (B, emb_dim)) if return_raw_embeddings.
         """
         # 1. Embed all fids in group order → flat cat
         all_embs = []
@@ -1256,7 +1268,10 @@ class RankMixerNSTokenizer(nn.Module):
         for chunk, proj in zip(chunks, self.token_projs):
             tokens.append(F.silu(proj(chunk)).unsqueeze(1))  # (B, 1, d_model)
 
-        return torch.cat(tokens, dim=1)  # (B, num_ns_tokens, d_model)
+        tokens_out = torch.cat(tokens, dim=1)  # (B, num_ns_tokens, d_model)
+        if return_raw_embeddings:
+            return tokens_out, all_embs
+        return tokens_out
 
 
 class PCVRHyFormer(nn.Module):
@@ -1788,11 +1803,29 @@ class PCVRHyFormer(nn.Module):
         logits = self.clsfier(output)  # (B, action_num)
         return logits
 
-    def predict(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Runs inference without dropout, returning both logits and embeddings."""
+    def predict(self, inputs: ModelInput,
+                return_ns_raw: bool = False):
+        """Runs inference without dropout, returning both logits and embeddings.
+
+        Args:
+            inputs: model input batch.
+            return_ns_raw: if True, also return per-fid raw NS embeddings
+                (user_raw, item_raw) as lists of (B, emb_dim) tensors.
+
+        Returns:
+            (logits, output) if return_ns_raw=False,
+            (logits, output, user_raw, item_raw) if return_ns_raw=True.
+        """
         # Reuses forward logic but without dropout
-        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
-        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
+        if return_ns_raw:
+            user_ns, user_raw = self.user_ns_tokenizer(
+                inputs.user_int_feats, return_raw_embeddings=True)
+            item_ns, item_raw = self.item_ns_tokenizer(
+                inputs.item_int_feats, return_raw_embeddings=True)
+        else:
+            user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
+            item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
+            user_raw = item_raw = None
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
 
@@ -1835,4 +1868,6 @@ class PCVRHyFormer(nn.Module):
         )
 
         logits = self.clsfier(output)
+        if return_ns_raw:
+            return logits, output, user_raw, item_raw
         return logits, output

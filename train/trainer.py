@@ -402,6 +402,9 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
+            if epoch == 1:
+                self._diagnose_ns_embeddings()
+
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
@@ -565,3 +568,155 @@ class PCVRHyFormerRankingTrainer:
         logits = logits.squeeze(-1)  # (B,)
 
         return logits, label
+
+    def _diagnose_ns_embeddings(self) -> None:
+        """NS Tokenizer fidelity diagnosis: LR AUC on raw embeddings vs raw values.
+
+        Runs once after E1 validation, uses validation data with labels.
+        Prints results to stdout.
+        """
+        from collections import defaultdict
+
+        S_TIER_FIDS = {5, 6, 7, 8, 9, 10, 12, 13, 16}
+        DIAG_MAX_SAMPLES = 5000
+
+        raw_model = getattr(self.model, '_orig_mod', self.model)
+        item_groups = raw_model.item_ns_tokenizer.groups
+        item_schema_entries = self.valid_loader.dataset.item_int_schema.entries
+
+        fid_to_pos: Dict[int, int] = {}
+        pos = 0
+        for group in item_groups:
+            for idx in group:
+                if idx < len(item_schema_entries):
+                    fid = item_schema_entries[idx][0]
+                    if fid in S_TIER_FIDS:
+                        fid_to_pos[fid] = pos
+                pos += 1
+
+        if not fid_to_pos:
+            logging.warning("[DIAG] No S-tier fids found in item_ns_tokenizer groups")
+            return
+
+        embs_by_fid = defaultdict(list)
+        all_labels = []
+        sample_count = 0
+
+        logging.info("[DIAG] Extracting NS embeddings for fidelity diagnosis...")
+        did_samples = 0
+        with torch.no_grad():
+            for batch in self.valid_loader:
+                if did_samples >= DIAG_MAX_SAMPLES:
+                    break
+                model_input = self._make_model_input(self._batch_to_device(batch))
+                B = model_input.user_int_feats.shape[0]
+
+                _, _, _, item_raw = raw_model.predict(model_input, return_ns_raw=True)
+
+                labels_np = batch['label'].cpu().numpy().astype(int)
+                all_labels.append(labels_np)
+
+                for fid, p in fid_to_pos.items():
+                    emb = item_raw[p].cpu().numpy()
+                    embs_by_fid[fid].append(emb)
+
+                did_samples += B
+            sample_count = did_samples
+
+        labels_all = np.concatenate(all_labels)
+        pos_rate = labels_all.mean()
+        logging.info(f"[DIAG] {sample_count} samples, pos_rate={pos_rate:.4f}")
+
+        if pos_rate < 0.001:
+            logging.warning("[DIAG] pos_rate near zero, skipping (no labels in valid set?)")
+            return
+
+        def _lr_auc(X, y, max_iter=500, lr=0.1):
+            n, d = X.shape
+            x_mean = X.mean(axis=0, keepdims=True)
+            x_std = X.std(axis=0, keepdims=True).clip(min=1e-8)
+            Xs = (X - x_mean) / x_std
+            w = np.zeros(d)
+            b = 0.0
+            for _ in range(max_iter):
+                logits = Xs @ w + b
+                prob = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
+                err = prob - y
+                w -= lr * (Xs.T @ err) / n
+                b -= lr * err.mean()
+            prob = 1.0 / (1.0 + np.exp(-np.clip(Xs @ w + b, -50, 50)))
+            n_pos = (y == 1).sum()
+            n_neg = (y == 0).sum()
+            if n_pos == 0 or n_neg == 0:
+                return float('nan')
+            order = np.argsort(prob)
+            rank = np.zeros(len(y))
+            rank[order] = np.arange(1, len(y) + 1)
+            rank_sum_pos = rank[y == 1].sum()
+            return (rank_sum_pos - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+        BASELINE_AUC = {
+            5: 0.6699, 6: 0.6370, 7: 0.6097, 8: 0.5603,
+            9: 0.6039, 10: 0.6596, 12: 0.6164, 13: 0.5955, 16: 0.6007,
+        }
+
+        results = {}
+        for fid in sorted(fid_to_pos.keys()):
+            X = np.concatenate(embs_by_fid[fid], axis=0)[:DIAG_MAX_SAMPLES]
+            y = labels_all[:len(X)]
+            try:
+                results[fid] = _lr_auc(X, y)
+            except Exception as e:
+                results[fid] = float('nan')
+                logging.warning(f"[DIAG] LR fid={fid} failed: {e}")
+
+        X_cat_parts = []
+        min_len = DIAG_MAX_SAMPLES
+        for fid in sorted(fid_to_pos.keys()):
+            X_cat_parts.append(np.concatenate(embs_by_fid[fid], axis=0)[:DIAG_MAX_SAMPLES])
+            min_len = min(min_len, len(X_cat_parts[-1]))
+        X_cat = np.concatenate([x[:min_len] for x in X_cat_parts], axis=1)
+        y_cat = labels_all[:min_len]
+        auc_all = _lr_auc(X_cat, y_cat) if X_cat.shape[0] > 1 else float('nan')
+
+        emb_dim = raw_model.emb_dim
+        tokenizer_type = raw_model.ns_tokenizer_type
+
+        print()
+        print("=" * 72)
+        print("  NS Tokenizer Fidelity Diagnosis (run after E1 validation)")
+        print("=" * 72)
+        print(f"  Samples: {sample_count}  |  pos_rate: {pos_rate:.4f}")
+        print(f"  emb_dim: {emb_dim}  |  tokenizer: {tokenizer_type}")
+        print("-" * 72)
+        print(f"  {'fid':<6} {'Raw value AUC':>14} {'Embedding AUC':>14} {'Delta':>10}")
+        print(f"  {'':-<6} {'':->14} {'':->14} {'':->10}")
+
+        total_delta = 0.0
+        n_valid = 0
+        for fid in sorted(fid_to_pos.keys()):
+            base = BASELINE_AUC.get(fid, float('nan'))
+            emb = results.get(fid, float('nan'))
+            delta = emb - base if (not np.isnan(base) and not np.isnan(emb)) else float('nan')
+            print(f"  fid={fid:<3} {base:>14.4f} {emb:>14.4f} {delta:>+10.4f}")
+            if not np.isnan(delta):
+                total_delta += delta
+                n_valid += 1
+
+        print("-" * 72)
+        print(f"  All 9 S-tier concat  : {auc_all:>14.4f}")
+        if n_valid > 0:
+            print(f"  Mean Δ (embed - raw) : {total_delta / n_valid:>+14.4f}")
+        print("=" * 72)
+        print()
+        mean_delta = total_delta / max(n_valid, 1)
+        if mean_delta > -0.02:
+            print("  ✓ Embedding preserves raw-value information well")
+            print("    → NS tokenizer is NOT the bottleneck.")
+            print("    → Content signal IS present; problem is downstream.")
+        else:
+            print("  ✗ Embedding AUC significantly below raw-value AUC")
+            print(f"    (mean Δ = {mean_delta:+.4f})")
+            print("    → Information is LOST inside NS tokenizer.")
+            print("    → Consider: larger emb_dim, finer groups.")
+        print()

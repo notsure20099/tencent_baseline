@@ -340,7 +340,33 @@ Exp38e: 5×4 per-fid per-domain 全交叉 + Item-Seq Cross Shortcut
     - 5×4 让每个 fid 独立发言 → 打破 5→1 pool 信息瓶颈
     - 短路让 item↔seq 交叉结果绕过 CrossAttn/时间信号垄断
     - 两条线在分类器入口会师 → loss 自然分配梯度
-  状态:        训练中
+
+  结果:
+    Valid AUC: E1=0.86326 E2=0.86578 E3=0.86656 E4=0.86663 E5=0.86694 E6=0.86693
+              E7=0.86706 E8=0.86715
+    参数轨迹 (E1→E2→E8):
+      igate gate d0 (长路径):  E1=0.327 → E2=0.367 → E8=0.367  ❄️ E2冻结
+      igate cross d0 (长路径): E1=0.502 → E2=0.590 → E8=0.605  🐌 +2.5%
+      scut gate (短路):        E1=0.106 → E2=0.121 → E8=0.125  🐌 +3.3%
+      scut cross (短路):       E1=0.562 → E2=0.675 → E8=0.696  🐌 +3.1%
+      scut shortcut_proj:      E1=4.615 → E2=4.614 → E8=4.623  ❄️ 冻结
+      scut entry gate:         E1=0.255 → E2=0.291 → E8=0.288  ❄️ E2冻结
+      scut entry cross:        E1=0.475 → E2=0.529 → E8=0.543  🐌 +2.6%
+      time_bias seq_c:         E1=6.40  → E2=8.34  → E8=16.38  🔥 +96%
+    → 终止训练，未提交 Test
+
+  核心发现:
+    - 短路路径已做到梯度路径足够短 (5-6步)、与 time_bias 物理隔离，
+      但短路参数同样在 E2 冻结
+    - 不是路径长度问题: 长路径(igate)和短路径(scut)的 gate 都在 E2 冻结
+    - 不是梯度竞争问题: shortcut_proj 和 entry gate 完全不受 time_bias 竞争
+    - loss 不奖励内容信号: E2 之后 loss 告知模型"走时间够用，内容无边际收益"
+    - 这是"缩短内容信号路径"方向上的决定性否定实验
+
+  判定:        ✗ 内容信号对当前 loss 无独立边际贡献。架构层面内容信号优化
+               基本无空间。item 特征的信息已被时间序列模式充分覆盖。
+  启示:        深挖时间信号是唯一有实验证据支持的方向。从架构优化转向
+               时间表示精细化（桶粒度/非线性/独立建模）。
 
 ═══════════════════════════════════════════════════════════════════════════════
 Exp39: Sequence Time-Delta + Dense High-Dim (×2 run)
@@ -376,6 +402,56 @@ Exp39: Sequence Time-Delta + Dense High-Dim (×2 run)
   启示:        时间通路应保持单一清晰信号源，不可叠加辅助信息。
 
 ═══════════════════════════════════════════════════════════════════════════════
+Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  分支:        exp29 (diagnosis only, no architecture change)
+  目的:        回答 20+ 个实验的终极底层问题：
+               S-tier 9 个 item fid 的原始值单特征 LR AUC = 0.56-0.67，
+               但为什么所有"内容信号注入"实验（短/中/长路径、短路）全部失败？
+  假设 A:     NS tokenizer 的 Embedding→组内融合→线性投影 压缩链路破坏了信息
+               → embedding 向量 LR AUC 远低于原始值 → 问题在入口
+  假设 B:     NS tokenizer 完整保留了信息
+               → embedding LR AUC ≈ 原始值 → 问题在下游（loss 不需要内容）
+
+  方法:
+    在 E1 验证完成后，抽取 item S-tier 9 个 fid 在 NS tokenizer 出口的
+    64维原始 embedding 向量（未进入 CrossAttention / RankMixer）。
+    每 fid 独立训纯 numpy 逻辑回归 → 算 AUC。
+    对比 feature_audit 的原始值 LR AUC 基线。
+
+  参数:
+    训练中硬编码调用（trainer.py _diagnose_ns_embeddings），
+    使用验证集前 5000 条带标签数据。
+    纯 numpy LR（无 sklearn 依赖，500 次梯度下降 + 向量化 AUC）。
+
+  基线 (feature_audit 原始值 LR AUC):
+    fid=5: 0.6699  fid=6: 0.6370  fid=7: 0.6097  fid=8: 0.5603
+    fid=9: 0.6039  fid=10:0.6596  fid=12:0.6164  fid=13:0.5955  fid=16:0.6007
+
+  输出格式:
+    fid  |  Raw value AUC  |  Embedding AUC  |  Delta
+
+  判定标准:
+    Mean Δ > -0.02 → 假设A被推翻，embedding 保信息良好，问题在下游
+    Mean Δ < -0.05 → 假设B被推翻，信息在 NS tokenizer 已丢失
+
+  结果:       等待中 (训练进行中)
+  判定:       待定
+
+  后续路线图 (取决于诊断结果):
+    ┌─ 如果 Embedding AUC ≈ 原始值 AUC (假设A被推翻)
+    │    ├─ 方向 1: 双塔融合 — 内容与时间独立建模，预测层加权
+    │    ├─ 方向 2: Content-Type Bias — 在 CrossAttn softmax 入口
+    │    │           与 time_bias 并列注入 per-token-type bias
+    │    └─ 方向 3: 重新审视 feature_audit 的 A级/B级特征
+    │
+    └─ 如果 Embedding AUC ≪ 原始值 AUC (假设B被推翻)
+         ├─ 方向 1: emb_dim 提升实验 (64→128/256)
+         ├─ 方向 2: S-tier fid 独立分组 (finer ns_groups)
+         └─ 方向 3: S-tier 独立 Embedding 直连 classifier (绕过 tokenizer)
+
+═══════════════════════════════════════════════════════════════════════════════
 经验教训
 ═══════════════════════════════════════════════════════════════════════════════
   1. 时间是当前最重要且唯一被验证有效的信号。
@@ -383,7 +459,9 @@ Exp39: Sequence Time-Delta + Dense High-Dim (×2 run)
   3. 序列浅层统计特征（共现/密度/长度）完全没有区分力。
   4. Valid AUC 0.8675 是硬天花板——必须以 Test AUC 为唯一终判标准。
   5. RankMixer ffn_only 降级模式从 Exp27 起一直是隐藏瓶颈。
-  6. 内容信号路径比时间信号长 4-5 倍，模型天然倾向走时间捷径。
+  6. ~~内容信号路径比时间信号长 4-5 倍，模型天然倾向走时间捷径。~~
+     → Exp38e 证伪：短路已做到 5-6 步，与 time_bias 物理隔离，
+       但内容路径参数仍在 E2 冻结。不是路径长度问题。
   7. 「加参数但未打通瓶颈」的实验都导致 Test AUC 下降。
   8. （Exp33）full mode 退化根因：共享 FFN 梯度污染。
   9. （Exp33）单 Q token 是序列信息利用的核心瓶颈。
@@ -400,56 +478,82 @@ Exp39: Sequence Time-Delta + Dense High-Dim (×2 run)
       S-tier item 特征的跨域交叉有价值，但 mean pooling + 标量 gate 限制了增益。
   16.（Exp38b）time_bias 是当前唯一持续活跃的参数线(E4→E6 norm 10→12)，
        模型边际收益几乎全部来自时间信号的深化利用。内容信号路径仍需优化。
+       → Exp38e 证伪"仍需优化"：短路也无用，不是优化不够，是信息本身冗余。
   17.（Exp38c）attention pooling 并未改善 per-sample 自适应——attn 参数
        在 E2 就冻结于 0.094，后续 7 个 epoch 完全不动。
   18.（Exp38c）E1→E2 是所有模块唯一的"黄金窗口期"——此后梯度被 time_bias 垄断。
+       → Exp38e 修正：不是被 time_bias 垄断，是 loss 在 E2 后不再需要内容信号。
   19.（Exp38c）gate d0=0.37 是时间竞争下的最优值，不是真正的饱和——
        ItemGate 停不是因为容量不够，而是梯度传不回来。
-  20.（Exp38 系列）梯度不平等是唯一瓶颈：time_bias 2步梯度 vs ItemGate 9步梯度，
-       衰减系数差距≈800倍。67K参数被2K参数碾压在梯度赛道上。
+       → Exp38e 修正：短路也停在同一水平，停的原因是 loss 无需求，不是梯度衰减。
+  20.~~（Exp38 系列）梯度不平等是唯一瓶颈：time_bias 2步梯度 vs ItemGate 9步梯度，
+       衰减系数差距≈800倍。67K参数被2K参数碾压在梯度赛道上。~~
+       → Exp38e 证伪：短路 5-6 步、无竞争，同样 E2 冻结。瓶颈不在梯度。
   21.（Exp38d-A）冻结 time_bias 并未让 ItemGate 学到更多——gate 在无竞争环境
        4 个 epoch 后仍停在 0.37（与有竞争环境 2 个 epoch 结果相同）。
        梯度竞争假说被推翻。真正瓶颈是 5→1 pooling 信息压缩。
+       → Exp38e 深化：5×4 per-fid + 短路同样 E2 冻结，瓶颈在信息本身，不在 pool。
   22.（Exp38 系列终判）Item Gate 方向正确（Exp38b Test +0.00003），但 pool 机制
        （无论是 mean 还是 attention）在 E2 就把 5 个 fid 的差异化信息压缩殆尽。
        打破天花板的唯一方式是 per-fid per-domain 独立交叉。
+       → Exp38e 最终否定：独立交叉 + 短路（路径最短）同样无用。
   23.（Exp39）time_delta 有独立梯度流但未产生 AUC 收益。额外信息混入
         时间通路会稀释绝对时间信号纯度（与 Exp30 同模式）。
         时间通路应保持单一清晰信号源。
   24.（Exp39）Dense 6→4 回退后参数全部冻结，额外 token 只增负担不增信息。
         983维 dense 在 4 token 时已达信息饱和。
+  25.（Exp38e ★决定性）长路径(igate 9步)和短路径(scut 5-6步)的 gate 参数
+        均在 E2 冻结。内容信号对当前 loss 无独立边际贡献——不是因为路径长短、
+        梯度竞争、pool 压缩，而是 item 特征的信息已被时间序列模式充分覆盖。
+        "缩短内容信号路径"方向在此任务上已穷尽。
+  26.（全局终判）20+ 实验，涵盖长/中/短/混合路径的所有内容信号注入方式，
+        结果一致：内容特征无法超越时间信噪比瓶颈。唯一稳定正收益方向是
+        Exp29 的 per-head time_bias。未来优化应聚焦时间表示精细化，
+        不再新增内容信号路径。
 
 ═══════════════════════════════════════════════════════════════════════════════
 Test AUC 排行榜 (Exp28+)
 ═══════════════════════════════════════════════════════════════════════════════
   🥇 Exp38b ItemGate(mean)      0.847301  +0.00003 vs Exp29
   🥈 Exp38c ItemGate(attn)      0.847299  +0.00003 vs Exp29
-  🥈 Exp29 PerHeadTimeBias      0.84727   基线
+  🥈 Exp29 PerHeadTimeBias      0.84727   基线 ★
   4  Exp31a TimeBiasMLP         0.846817
   5  Exp38a NoiseCompress       0.846689
   6  Exp28                      0.846318
   7  Exp27                      0.846090
   8  Exp37 I2Boost              0.844821
+  —  Exp38e 5×4+Shortcut        未提交 (E2参数冻结，终止)
+  —  Exp38d-A 冻结time_bias     未提交 (假说被推翻，终止)
+  —  Exp39 time_delta+dense     未提交 (AUC低于基线，终止)
 
 ═══════════════════════════════════════════════════════════════════════════════
-当前特征全景 & 下一步方向
+当前特征全景 & 下一步方向 (Exp38e 终判后修订)
 ═══════════════════════════════════════════════════════════════════════════════
-  有效信号 (已验证):
+  有效信号 (唯一):
     time_bias (Exp29): 唯一 +0.00095 Test 收益的改动, 路径短(1步直达softmax)
 
-  微弱正信号 (未验证能否独立增益):
-    I2 item 组 (AUC 0.5534): Exp37 分拆为两 token, Valid AUC 与 Exp29 平行
-    fid=61 dense (13/256维 AUC>0.55): 尚未独立实验
+  已穷尽无效的方向:
+    内容信号架构优化 ×12 (Exp20/30/31a/32/33/35/36/37/38a/38b/38c/38d-A/38e)
+      覆盖：长路径、中路径、短路径、短路、噪声压缩、S-tier增强、I2独立、
+            per-head时间注入、AttentionPooling、per-fid独立交叉
+      一致结论：架构层面内容信号优化空间已为零
 
-  已探索无效的方向:
-    序列内容优化 ×7 (Exp20/30/31a/32/33/35/36): 全部 ≤ Exp29
-    NS 浅层特征 ×1 (探索): 全部 AUC 0.47-0.53
-    position-based 编码 ×1 (Exp35): train/test 长度分布无法泛化
-    full mode 单开 ×1 (Exp33): 梯度污染, Test -0.00174
-    Attention Pooling ×1 (Exp36): 注意力弥散, 退化为 MeanPool
+  下一步方向 (Exp40 诊断结果驱动，废弃旧 T 方案):
+    ═══ 等待 Exp40 结果 ═══
 
-  下一步优先级:
-    P0: Exp38 NS 消融实验 — 回答噪音 vs 宝藏问题
-    P1: 如果 Exp38 证明多数是噪音 → 永久压缩 NS token 数
-        如果 Exp38 证明含深层信号 → 保留, 转攻 User×Item 深层交互
-    P2: 基于 Exp38 结论决定是否做 fid=61 dense 独立投影
+    ┌─ 假设A成立 (embedding 保信息良好):
+    │    P0: 双塔融合 — 内容 MLP 塔 + 序列塔，预测层加权融合
+    │        (Exp38e 证明"架构内注入内容信号"已穷尽，唯一未尝试的是独立建模)
+    │    P1: Content-Type Bias — 模仿 time_bias 机制，在 CrossAttn softmax
+    │        入口注入 per-token-type 的可学习偏置
+    │    P2: ensembling — 多模型加权投票
+    │
+    └─ 假设B成立 (embedding 已丢信息):
+         P0: emb_dim 64→128, 重跑 diagnosis 确认恢复程度
+         P1: S-tier fid 独立 ns_group（每组 1-2 个 fid，避免组内信号稀释）
+         P2: S-tier 特征绕过 NS tokenizer，独立 Embedding 直连 classifier
+
+    不再考虑的方向:
+      ❌ 时间表示精细化 T1/T2/T3 — 不是无效，而是必须先回答 embedding 问题
+      ❌ 任何在现有架构内部注入内容的方案 — Exp38e 已为终极否定
+      ❌ 时间信息混入非时间通路
