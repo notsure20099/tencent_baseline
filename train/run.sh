@@ -3,7 +3,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp39: Sequence Time-Delta + Dense High-Dim Preservation
+#    (1) CrossAttention: per-head time-delta bias (inter-event gaps)
+#    (2) Dense: dense_token_groups=6 (983dim → 6 tokens, 2.5:1 compr)
+#    (3) AMP bfloat16 + set_float32_matmul_precision('high') for speed
+#    (4) prefetch_factor=8 for DataLoader throughput
+#  Baseline Exp29 (PerHeadTimeBias).
+#  Exp38b ns_groups.json (S-tier item + noise compressed user).
+#  d_model=64, T=17 → ffn_only.
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -16,7 +23,8 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --warmup_steps 400 \
     --dropout_rate 0.1 \
     --use_item_bridge \
-    --dense_token_groups 4 \
+    --dense_token_groups 6 \
     --dense_aware_qgen \
     --use_time_bias \
+    --use_time_delta \
     "$@"

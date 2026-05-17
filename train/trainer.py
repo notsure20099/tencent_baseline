@@ -9,6 +9,7 @@ import glob
 import shutil
 import logging
 import math
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -72,6 +73,7 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        amp_scaler: Optional[Any] = None,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -125,6 +127,7 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        self.amp_scaler = amp_scaler
 
         # LR scheduler: linear warmup + cosine decay (applied per step)
         self.dense_scheduler = None
@@ -402,6 +405,8 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
+            self._log_param_stats()
+
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
@@ -478,19 +483,30 @@ class PCVRHyFormerRankingTrainer:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, 1)
-        logits = logits.squeeze(-1)  # (B,)
 
-        if self.loss_type == 'focal':
-            loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+        ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.amp_scaler is not None else nullcontext()
+        with ctx:
+            logits = self.model(model_input)  # (B, 1)
+            logits = logits.squeeze(-1)  # (B,)
+            if self.loss_type == 'focal':
+                loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            else:
+                loss = F.binary_cross_entropy_with_logits(logits, label)
+
+        if self.amp_scaler is not None:
+            self.amp_scaler.scale(loss).backward()
+            self.amp_scaler.unscale_(self.dense_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
+            self.amp_scaler.step(self.dense_optimizer)
+            if self.sparse_optimizer is not None:
+                self.amp_scaler.step(self.sparse_optimizer)
+            self.amp_scaler.update()
         else:
-            loss = F.binary_cross_entropy_with_logits(logits, label)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
-
-        self.dense_optimizer.step()
-        if self.sparse_optimizer is not None:
-            self.sparse_optimizer.step()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
+            self.dense_optimizer.step()
+            if self.sparse_optimizer is not None:
+                self.sparse_optimizer.step()
 
         # Step LR schedulers
         if self.dense_scheduler is not None:
@@ -552,6 +568,20 @@ class PCVRHyFormerRankingTrainer:
             logloss = float('inf')
 
         return auc, logloss
+
+    @torch.no_grad()
+    def _log_param_stats(self) -> None:
+        raw = self.model
+        for bi, block in enumerate(raw.blocks):
+            for ci, ca in enumerate(block.cross_attns):
+                if hasattr(ca, 'temporal_bias') and ca.temporal_bias is not None:
+                    tb = ca.temporal_bias.weight
+                    domain = {0: 'seq_a', 1: 'seq_b', 2: 'seq_c', 3: 'seq_d'}.get(ci, f'ca{ci}')
+                    logging.info(f"[Param] b{bi}_time_bias_{domain} norm={float(tb.norm()):.4f}")
+                if hasattr(ca, 'time_delta_bias') and ca.time_delta_bias is not None:
+                    td = ca.time_delta_bias.weight
+                    domain = {0: 'seq_a', 1: 'seq_b', 2: 'seq_c', 3: 'seq_d'}.get(ci, f'ca{ci}')
+                    logging.info(f"[Param] b{bi}_time_delta_{domain} norm={float(td.norm()):.4f}")
 
     def _evaluate_step(
         self, batch: Dict[str, Any]

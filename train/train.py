@@ -9,14 +9,16 @@ Environment variables (take precedence over CLI flags):
     TRAIN_LOG_PATH   Log directory
 """
 
+import torch
+
+torch.set_float32_matmul_precision('high')
+
 import os
 import json
 import argparse
 import logging
 from pathlib import Path
 from typing import List, Tuple
-
-import torch
 
 from utils import set_seed, EarlyStopping, create_logger
 from dataset import FeatureSchema, get_pcvr_data, NUM_TIME_BUCKETS
@@ -136,6 +138,9 @@ def parse_args() -> argparse.Namespace:
                         help='Add learnable per-time-bucket scalar bias to '
                              'CrossAttention scores so that recent events '
                              'naturally receive higher attention')
+    parser.add_argument('--use_time_delta', action='store_true', default=False,
+                        help='Add learnable per-time-delta bias: models '
+                             'inter-event time gaps in CrossAttention')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixerBlock mode: '
@@ -328,10 +333,11 @@ def main() -> None:
         "dense_token_groups": args.dense_token_groups,
         "dense_aware_qgen": args.dense_aware_qgen,
         "use_time_bias": args.use_time_bias,
+        "use_time_delta": args.use_time_delta,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
-    model = torch.compile(model)
+    amp_scaler = torch.amp.GradScaler('cuda') if args.device == 'cuda' else None
 
     # Log model sizing info.
     num_sequences = len(pcvr_dataset.seq_domains)
@@ -381,6 +387,7 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        amp_scaler=amp_scaler,
     )
 
     trainer.train()

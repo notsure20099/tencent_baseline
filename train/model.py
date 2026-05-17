@@ -273,11 +273,13 @@ class CrossAttention(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        use_time_delta: bool = False,
     ) -> None:
         super().__init__()
         self.ln_mode = ln_mode
         self.use_item_bridge = use_item_bridge
         self.use_time_bias = use_time_bias
+        self.use_time_delta = use_time_delta
 
         self.attn = RoPEMultiheadAttention(
             d_model=d_model,
@@ -299,6 +301,10 @@ class CrossAttention(nn.Module):
         if use_time_bias:
             self.temporal_bias = nn.Embedding(num_time_buckets, num_heads)
             nn.init.uniform_(self.temporal_bias.weight, -0.5, 0.5)
+
+        if use_time_delta:
+            self.time_delta_bias = nn.Embedding(num_time_buckets, num_heads)
+            nn.init.zeros_(self.time_delta_bias.weight)
 
     def forward(
         self,
@@ -342,6 +348,15 @@ class CrossAttention(nn.Module):
         if self.use_time_bias and key_time_buckets is not None:
             time_bias = self.temporal_bias(key_time_buckets)  # (B, L, num_heads)
             time_bias = time_bias.transpose(1, 2)  # (B, num_heads, L)
+
+            if self.use_time_delta:
+                B, L = key_time_buckets.shape
+                ti = key_time_buckets.unsqueeze(-1).expand(-1, -1, L)
+                tj = key_time_buckets.unsqueeze(-2).expand(-1, L, -1)
+                delta = (ti - tj).abs().clamp(0, 64)
+                delta_bias = self.time_delta_bias(delta)
+                delta_bias = delta_bias.permute(0, 3, 1, 2)
+                time_bias = time_bias + delta_bias
 
         out, _ = self.attn(
             query=query,
@@ -931,6 +946,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        use_time_delta: bool = False,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -959,6 +975,7 @@ class MultiSeqHyFormerBlock(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                use_time_delta=use_time_delta,
             )
             for _ in range(num_sequences)
         ])
@@ -1304,6 +1321,7 @@ class PCVRHyFormer(nn.Module):
         dense_token_groups: int = 1,
         dense_aware_qgen: bool = False,
         use_time_bias: bool = False,
+        use_time_delta: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1484,6 +1502,7 @@ class PCVRHyFormer(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                use_time_delta=use_time_delta,
             )
             for _ in range(num_hyformer_blocks)
         ])

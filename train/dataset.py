@@ -735,7 +735,7 @@ def get_pcvr_data(
     _train_kw = {}
     if num_workers > 0:
         _train_kw['persistent_workers'] = True
-        _train_kw['prefetch_factor'] = 4
+        _train_kw['prefetch_factor'] = 8
 
     train_loader = DataLoader(
         train_dataset, batch_size=None,

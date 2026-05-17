@@ -72,6 +72,7 @@ _FALLBACK_MODEL_CFG = {
     'dense_token_groups': 1,
     'dense_aware_qgen': False,
     'use_time_bias': False,
+    'use_time_delta': False,
 }
 
 _FALLBACK_SEQ_MAX_LENS = 'seq_a:256,seq_b:256,seq_c:512,seq_d:512'
@@ -248,6 +249,8 @@ def load_model_state_strict(
     with a diagnostic message.
     """
     state_dict = torch.load(ckpt_path, map_location=device)
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        state_dict = {k.removeprefix('_orig_mod.'): v for k, v in state_dict.items()}
     try:
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as e:
