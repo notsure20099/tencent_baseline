@@ -583,6 +583,19 @@ class PCVRHyFormerRankingTrainer:
                     domain = {0: 'seq_a', 1: 'seq_b', 2: 'seq_c', 3: 'seq_d'}.get(ci, f'ca{ci}')
                     logging.info(f"[Param] b{bi}_time_delta_{domain} norm={float(td.norm()):.4f}")
 
+        if hasattr(raw, 'user_dense_proj'):
+            for gi, proj in enumerate(raw.user_dense_proj):
+                w_norm = float(proj[0].weight.norm())
+                in_dim = raw._dense_group_dims_list[gi]
+                logging.info(f"[Param] dense_g{gi} dim={in_dim} proj_norm={w_norm:.4f}")
+
+        if hasattr(raw, 'item_dense_proj'):
+            idp_w = float(raw.item_dense_proj[0].weight.norm())
+            logging.info(f"[Param] item_dense_proj norm={idp_w:.4f}")
+
+        if hasattr(raw, '_dense_group_dims_list'):
+            logging.info(f"[Param] dense_group_dims: {raw._dense_group_dims_list} total={sum(raw._dense_group_dims_list)}")
+
     def _evaluate_step(
         self, batch: Dict[str, Any]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
