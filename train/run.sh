@@ -3,9 +3,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp39: Sequence Time-Delta + Dense High-Dim Preservation
+#  Exp39: Sequence Time-Delta (dense 4 groups, time_delta only)
 #    (1) CrossAttention: per-head time-delta bias (inter-event gaps)
-#    (2) Dense: dense_token_groups=6 (983dim → 6 tokens, 2.5:1 compr)
+#    (2) Dense: dense_token_groups=4 (Exp27 baseline, proven effective)
 #    (3) AMP bfloat16 + set_float32_matmul_precision('high') for speed
 #    (4) prefetch_factor=8 for DataLoader throughput
 #  Baseline Exp29 (PerHeadTimeBias).
@@ -23,7 +23,7 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --warmup_steps 400 \
     --dropout_rate 0.1 \
     --use_item_bridge \
-    --dense_token_groups 6 \
+    --dense_token_groups 4 \
     --dense_aware_qgen \
     --use_time_bias \
     --use_time_delta \
