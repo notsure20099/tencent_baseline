@@ -351,11 +351,9 @@ class CrossAttention(nn.Module):
 
             if self.use_time_delta:
                 B, L = key_time_buckets.shape
-                ti = key_time_buckets.unsqueeze(-1).expand(-1, -1, L)
-                tj = key_time_buckets.unsqueeze(-2).expand(-1, L, -1)
-                delta = (ti - tj).abs().clamp(0, 64)
+                delta = (key_time_buckets - key_time_buckets[:, 0:1]).abs().clamp(0, 64)
                 delta_bias = self.time_delta_bias(delta)
-                delta_bias = delta_bias.permute(0, 3, 1, 2)
+                delta_bias = delta_bias.transpose(1, 2)
                 time_bias = time_bias + delta_bias
 
         out, _ = self.attn(
