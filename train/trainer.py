@@ -404,7 +404,12 @@ class PCVRHyFormerRankingTrainer:
 
             if epoch == 1:
                 self._diagnose_ns_embeddings()
-                self._diagnose_full_chain()
+                try:
+                    self._diagnose_full_chain()
+                except Exception as e:
+                    import traceback
+                    logging.error(f"[DIAG-CHAIN] Failed: {e}")
+                    traceback.print_exc()
 
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
@@ -723,18 +728,8 @@ class PCVRHyFormerRankingTrainer:
         print()
 
     def _diagnose_full_chain(self) -> None:
-        """Full-chain S-tier fidelity diagnosis at every pipeline stage.
-
-        After E1, collects intermediate activations for all 4 NS item groups
-        and all 4 per-domain Q tokens at every stage:
-          Stage 1: item_ns — after GroupNSTokenizer projection (Linear+SiLU)
-          Stage 2: q_tokens — after MultiSeqQueryGenerator (before CrossAttn)
-          Stage 3: decoded_q — after CrossAttention
-          Stage 4: boosted_q — after RankMixer token mixing
-          Stage 5: output — after output_proj (before classifier)
-
-        Runs LR on each stage's vectors and compares AUC.
-        """
+        """Full-chain S-tier fidelity diagnosis at every pipeline stage."""
+        logging.info("[DIAG-CHAIN] Entering _diagnose_full_chain...")
         from collections import defaultdict
 
         DIAG_MAX_SAMPLES = 5000
