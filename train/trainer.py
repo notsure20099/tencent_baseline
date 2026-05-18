@@ -679,8 +679,9 @@ class PCVRHyFormerRankingTrainer:
 
         for d in domains:
             sl = np.concatenate(all_seq_lens[d])[:N] if all_seq_lens[d] else np.zeros(N)
-            lt = np.array(all_latest_tb[d])[:N] if all_latest_tb[d] else np.zeros(N, dtype=np.float64)
-            ne = np.array(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
+            lt = (np.concatenate([np.atleast_1d(x) for x in all_latest_tb[d]])[:N]
+                  if all_latest_tb[d] else np.zeros(N, dtype=np.float64))
+            ne = np.concatenate(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
             print(f"  {d}:")
             for name, ids in [("hi5", hi5), ("hi10", hi10), ("lo10", lo10)]:
                 mask = ids[ids < len(sl)]
@@ -697,7 +698,7 @@ class PCVRHyFormerRankingTrainer:
         sum_evt_hi5, sum_evt_lo10 = np.zeros(len(hi5)), np.zeros(len(lo10))
         for d in domains:
             sl = np.concatenate(all_seq_lens[d])[:N] if all_seq_lens[d] else np.zeros(N)
-            ne = np.array(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
+            ne = np.concatenate(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
             for i_arr, ids in [(sum_len_hi5, hi5), (sum_len_lo10, lo10)]:
                 for j, idx in enumerate(ids):
                     if idx < len(sl):
