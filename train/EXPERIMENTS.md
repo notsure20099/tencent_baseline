@@ -510,6 +510,76 @@ Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
         结果一致：内容特征无法超越时间信噪比瓶颈。唯一稳定正收益方向是
         Exp29 的 per-head time_bias。未来优化应聚焦时间表示精细化，
         不再新增内容信号路径。
+  27.（Exp40 ★最终诊断）NS Tokenizer fidelity diagnosis: 全部 9 个 S-tier fid
+        的 Embedding AUC > 原始值 AUC (Mean Δ=+0.0607)。Embedding 未破坏信息。
+        内容信号的消失发生在 Embedding 之后的压缩链路中。
+  28.（Exp40 ★全链路诊断）5 阶段逐层 LR AUC: Q 生成阶段凭空跃升 +0.1168,
+        增益来自 time_embedding 混入的 seq token。内容和时间被焊死在同一 Q 中。
+  29.（Exp41 ★终判）时-空解耦双路径架构 6 个优化全部 E1 冻结。证伪了"时间污染"
+        假说。item 的独立预测信息已被时间序列模式完全覆盖。
+        ItemBridge +0.00003 = item 作为「条件变量」的唯一边际价值。
+  30.（方法论）单变量 LR AUC 有效但不充分: fid=5 AUC 0.67 证明了孤立区分力,
+        但不能证明「在时间信号存在时 item 仍有区分力」。
+  31.（Exp42 ★方向转折）Error Analysis 发现 fid=8 的 nz_rate 在高误差样本中
+        3 倍于低误差样本 (42% vs 13%), 而 M1 时间分布完全无差异。
+        不是「时间信号不够」, 是「universal time_bias 不适用特定 item」。
+  32.（Exp43 ★方向）PerItemType TimeBias + fid8_flag: 让 time_bias 感知 item
+        差异(CrossAttention 8 params) + fid=8>0 硬特征直连 classifier(65 params)。
+        总共 73 参数, 不改架构。是 20+ 个实验后唯一同时满足: (a) 有明确实验证据、
+        (b) 沿袭已验证通路、(c) 不触碰已穷尽方向 的方案。
+  33.（Exp43 ★新设计）首次使用 0 参数 if-else 特征 (fid=8>0) 直连 classifier。
+        等价于"告诉模型这是一个困难 item"的 hard feature。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  分支:        exp29 (diagnosis only)
+  方法:        E1 后抽取 item S-tier 9 fid 的 64维原始 embedding, 纯 numpy LR
+  结果:        全部 9 fid Embedding AUC > Raw AUC (Mean Δ=+0.0607)
+              All 9 concat LR AUC: 0.87
+  判定:        ✓ NS tokenizer 入口清白。信息丢失发生在 Embedding 之后。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp41: Time-Content Decouple — 时-空解耦双路径
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  改动:        双 Q(纯内容+时间)、双 CrossAttn、gate_fusion、item_scale、
+               weighted_pool, 6 个优化
+  结果:        E1-E3 全部参数冻结。gate_fusion E1 锁死, content_item_scale 倒退
+  判定:        ✗ item 独立预测信息被时间充分覆盖。item 条件变量价值仅 +0.00003。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp42: Error Analysis — 找模型预测最差样本的共同特征
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  分支:        exp42_error_analysis
+  方法:        E2 后 top-5%/best-10% error 分组对比 M1 时间/M2 序列/M3 item fid
+  核心发现:    fid=8 top5% nz=42% vs best10% nz=13% (差 28.9pp)
+              M1 时间分布 hi5 vs lo10 完全零差异
+  判定:        ✓ fid=8 是 hard converters 的唯一标识。universal time_bias 不适用。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp43: PerItemType TimeBias + fid8_flag — item 感知双重机制
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-19
+  分支:        exp43_per_item_type_timebias (基于 Exp29)
+  背景:        Exp42 发现 fid=8 是 hard converter 标志。Exp41 证伪所有内容路径。
+  改动:
+    (1) CrossAttention 新增 item_type_bias Embedding(2, num_heads) zero-init
+        对 fid=8 item 的 time_bias 做加法调制 (8 params)
+    (2) classifier 输入 concat fid8_flag (fid=8>0 的 0/1 标量)
+        classifier: Linear(D+1, D) → ... (65 params)
+    (3) 每 epoch 后 error_analysis (M1/M2/M3) + item_type_bias 权重监控
+  总参数:    73 params (8 + 65)
+  设计原则:
+    - 不改架构: item_type_bias 在 CrossAttention 内并行加一行, fid8_flag 在 clsfier 前 concat
+    - 零学习负担: fid8_flag 是 hard feature, 不需从零学"item 是什么"
+    - 沿袭 Exp29 已验证通路: time_bias 继续做本职工作, item_type_bias 仅做微调
+    - 极低过拟合风险: 73 参数 vs 全模型 ~12M
+  假设:       fid=8 item 的转化时间衰减与均值不同 → item_type_bias 学到非零 norm;
+              fid8_flag 给 classifier 直接信号 → hard converters 预测提升 → Test AUC 增益
+  状态:       训练中 (E1 崩溃于 error_analysis bug, 已修复重推)
 
 ═══════════════════════════════════════════════════════════════════════════════
 Test AUC 排行榜 (Exp28+)
@@ -522,38 +592,28 @@ Test AUC 排行榜 (Exp28+)
   6  Exp28                      0.846318
   7  Exp27                      0.846090
   8  Exp37 I2Boost              0.844821
-  —  Exp38e 5×4+Shortcut        未提交 (E2参数冻结，终止)
-  —  Exp38d-A 冻结time_bias     未提交 (假说被推翻，终止)
+  —  Exp38e 5×4+Shortcut        未提交 (E2冻结，终止)
+  —  Exp38d-A 冻结time_bias     未提交 (假说推翻，终止)
   —  Exp39 time_delta+dense     未提交 (AUC低于基线，终止)
+  —  Exp41 TimeContentDecouple  未提交 (E3冻结，终止)
+  —  Exp43 PerItemTypeTimeBias  训练中
 
 ═══════════════════════════════════════════════════════════════════════════════
-当前特征全景 & 下一步方向 (Exp38e 终判后修订)
+当前全景 & 下一步方向 (Exp43 训练中)
 ═══════════════════════════════════════════════════════════════════════════════
-  有效信号 (唯一):
-    time_bias (Exp29): 唯一 +0.00095 Test 收益的改动, 路径短(1步直达softmax)
+  唯一有效信号: time_bias (Exp29, +0.00095)
 
-  已穷尽无效的方向:
-    内容信号架构优化 ×12 (Exp20/30/31a/32/33/35/36/37/38a/38b/38c/38d-A/38e)
-      覆盖：长路径、中路径、短路径、短路、噪声压缩、S-tier增强、I2独立、
-            per-head时间注入、AttentionPooling、per-fid独立交叉
-      一致结论：架构层面内容信号优化空间已为零
+  已穷尽:
+    架构内内容注入 ×14 (Exp20-Ex41)
+    时-空解耦 (Exp41: 全部 E1 冻结)
+    universal time_bias 不适用 fid=8 item (Exp42 M1 零差异)
 
-  下一步方向 (Exp40 诊断结果驱动，废弃旧 T 方案):
-    ═══ 等待 Exp40 结果 ═══
+  当前实验 Exp43:
+    双重机制: time_bias item 调制 (8 params) + fid8_flag 直连 (65 params)
+    监控:    per-epoch error_analysis (M1/M2/M3) + item_type_bias 权重
+    假设:    fid=8 item 需要自己的时间衰减 → Test AUC 增益
 
-    ┌─ 假设A成立 (embedding 保信息良好):
-    │    P0: 双塔融合 — 内容 MLP 塔 + 序列塔，预测层加权融合
-    │        (Exp38e 证明"架构内注入内容信号"已穷尽，唯一未尝试的是独立建模)
-    │    P1: Content-Type Bias — 模仿 time_bias 机制，在 CrossAttn softmax
-    │        入口注入 per-token-type 的可学习偏置
-    │    P2: ensembling — 多模型加权投票
-    │
-    └─ 假设B成立 (embedding 已丢信息):
-         P0: emb_dim 64→128, 重跑 diagnosis 确认恢复程度
-         P1: S-tier fid 独立 ns_group（每组 1-2 个 fid，避免组内信号稀释）
-         P2: S-tier 特征绕过 NS tokenizer，独立 Embedding 直连 classifier
-
-    不再考虑的方向:
-      ❌ 时间表示精细化 T1/T2/T3 — 不是无效，而是必须先回答 embedding 问题
-      ❌ 任何在现有架构内部注入内容的方案 — Exp38e 已为终极否定
-      ❌ 时间信息混入非时间通路
+  待 Exp43 结果决定下一步:
+    ┌─ 如果 AUC 涨 → 展开 per-fid time_bias (fid=7/8/12 各一套)
+    └─ 如果持平   → fid=8 问题是数据噪声, 非时间建模可解决
+                    转向样本重加权 / loss 重设计
