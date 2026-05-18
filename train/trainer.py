@@ -402,6 +402,8 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
+            self._error_analysis(epoch)
+
             if epoch == 1:
                 self._diagnose_ns_embeddings()
 
@@ -586,6 +588,177 @@ class PCVRHyFormerRankingTrainer:
                         f"type0={w[0].tolist()} type1={w[1].tolist()} "
                         f"norm0={np.linalg.norm(w[0]):.4f} norm1={np.linalg.norm(w[1]):.4f}"
                     )
+
+    def _error_analysis(self, epoch: int) -> None:
+        """Per-epoch error analysis: M1 time buckets, M2 seq density, M3 S-tier item fid.
+
+        Runs after every epoch evaluation.
+        """
+        DIAG_MAX = 300000
+        print()
+        print("=" * 72)
+        print(f"  ERROR ANALYSIS (after E{epoch} validation)")
+        print("=" * 72)
+
+        self.model.eval()
+        all_probs = []
+        all_labels = []
+
+        with torch.no_grad():
+            for batch in self.valid_loader:
+                if len(all_labels) * 256 >= DIAG_MAX:
+                    break
+                model_input = self._make_model_input(self._batch_to_device(batch))
+                logits, _ = self.model.predict(model_input)
+                probs = torch.sigmoid(logits.squeeze(-1)).cpu().numpy()
+                all_probs.append(probs)
+                all_labels.append(batch['label'].cpu().numpy().astype(np.int64))
+
+        probs = np.concatenate(all_probs)[:DIAG_MAX]
+        labels_np = np.concatenate(all_labels)[:DIAG_MAX]
+        N = len(probs)
+
+        print(f"  Total samples: {N}  |  pos_rate: {labels_np.mean():.4f}")
+
+        if len(np.unique(labels_np)) < 2:
+            print("  (single class, skipping)")
+            print("=" * 72)
+            print()
+            return
+
+        from sklearn.metrics import roc_auc_score
+        auc = float(roc_auc_score(labels_np, probs))
+        print(f"  AUC: {auc:.5f}")
+
+        error = np.abs(probs - labels_np)
+        order = np.argsort(error)[::-1]
+        top5_pct = int(N * 0.05)
+        top10_pct = int(N * 0.10)
+        hi5 = order[:top5_pct]
+        hi10 = order[:top10_pct]
+        lo10 = order[-top10_pct:]
+
+        print()
+        print("  ── Error distribution ──")
+        for pct in [50, 75, 90, 95, 99]:
+            print(f"  {pct}%  {np.percentile(error, pct):.4f}")
+
+        print()
+        print("  ── Group-level stats ──")
+        for name, ids in [("top-5%", hi5), ("top-10%", hi10), ("best-10%", lo10)]:
+            print(f"  {name:>10s}  Count={len(ids):<5}  Label rate={labels_np[ids].mean():.4f}  "
+                  f"Mean pred={probs[ids].mean():.4f}  Mean error={error[ids].mean():.4f}")
+
+        # ── M1: Time-bucket profile ──
+        print(f"\n  ── M1: Time-bucket profile (latest bucket per domain) ──")
+        logging.info("[DIAG-ERR] Collecting per-sample time_bucket stats from valid_loader...")
+        domains = self.valid_loader.dataset.seq_domains
+        all_seq_lens = {d: [] for d in domains}
+        all_latest_tb = {d: [] for d in domains}
+        all_n_events = {d: [] for d in domains}
+        collected = 0
+        with torch.no_grad():
+            for batch in self.valid_loader:
+                if collected >= DIAG_MAX:
+                    break
+                B = batch['label'].shape[0]
+                for d in domains:
+                    all_seq_lens[d].append(batch[f'{d}_len'].cpu().numpy())
+                    all_n_events[d].append((batch[f'{d}_len'] > 0).sum(axis=1).cpu().numpy())
+                    tb_key = f'{d}_time_bucket'
+                    if tb_key in batch:
+                        tb_np = batch[tb_key].cpu().numpy()
+                        for b in range(B):
+                            active = tb_np[b] > 0
+                            if active.sum() > 0:
+                                all_latest_tb[d].append(int(tb_np[b][active].min()))
+                            else:
+                                all_latest_tb[d].append(0)
+                collected += B
+
+        for d in domains:
+            sl = np.concatenate(all_seq_lens[d])[:N] if all_seq_lens[d] else np.zeros(N)
+            lt = np.array(all_latest_tb[d])[:N] if all_latest_tb[d] else np.zeros(N, dtype=np.float64)
+            ne = np.array(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
+            print(f"  {d}:")
+            for name, ids in [("hi5", hi5), ("hi10", hi10), ("lo10", lo10)]:
+                mask = ids[ids < len(sl)]
+                if len(mask) == 0:
+                    continue
+                sl_m = sl[mask].mean()
+                lt_m = lt[mask].mean() if len(lt) > 0 else 0
+                ne_m = ne[mask].mean() if len(ne) > 0 else 0
+                print(f"    {name:>6s}  seq_len={sl_m:7.1f}  latest_tb={lt_m:7.1f}  n_events={ne_m:7.1f}")
+
+        # ── M2: Global seq stats ──
+        print(f"\n  ── M2: Global seq stats (summed over domains) ──")
+        sum_len_hi5, sum_len_lo10 = np.zeros(len(hi5)), np.zeros(len(lo10))
+        sum_evt_hi5, sum_evt_lo10 = np.zeros(len(hi5)), np.zeros(len(lo10))
+        for d in domains:
+            sl = np.concatenate(all_seq_lens[d])[:N] if all_seq_lens[d] else np.zeros(N)
+            ne = np.array(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
+            for i_arr, ids in [(sum_len_hi5, hi5), (sum_len_lo10, lo10)]:
+                for j, idx in enumerate(ids):
+                    if idx < len(sl):
+                        i_arr[j] += sl[idx]
+            for i_arr, ids in [(sum_evt_hi5, hi5), (sum_evt_lo10, lo10)]:
+                for j, idx in enumerate(ids):
+                    if idx < len(ne):
+                        i_arr[j] += ne[idx]
+        print(f"  top-5%   total_events={sum_evt_hi5.mean():.1f}  total_length={sum_len_hi5.mean():.0f}")
+        print(f"  best-10% total_events={sum_evt_lo10.mean():.1f}  total_length={sum_len_lo10.mean():.0f}")
+
+        # ── M3: S-tier item fid nz_rate ──
+        print(f"\n  ── M3: S-tier item fid nz_rate ──")
+        S_TIER = {5, 6, 7, 8, 9, 10, 12, 13, 16}
+        item_schema = self.valid_loader.dataset.item_int_schema
+        fid_to_offset = {}
+        for fid, offset, length in item_schema.entries:
+            if fid in S_TIER:
+                fid_to_offset[fid] = offset
+
+        if fid_to_offset:
+            logging.info("[DIAG-ERR] Collecting item_int values from valid_loader...")
+            all_item = []
+            collected_item = 0
+            with torch.no_grad():
+                for batch in self.valid_loader:
+                    if collected_item >= DIAG_MAX:
+                        break
+                    item = batch['item_int_feats'].numpy().astype(np.int64)
+                    all_item.append(item)
+                    collected_item += item.shape[0]
+            all_item = np.concatenate(all_item, axis=0)[:N]
+
+            for fid, offset in sorted(fid_to_offset.items()):
+                col = all_item[:, offset]
+                nz_hi5 = (col[hi5[hi5 < len(col)]] > 0).mean()
+                nz_lo10 = (col[lo10[lo10 < len(col)]] > 0).mean()
+                diff = nz_hi5 - nz_lo10
+                flag = "  ←" if abs(diff) > 0.02 else ""
+                print(f"  fid={fid:<4} top5% nz={nz_hi5:.4f} best10% nz={nz_lo10:.4f} diff={diff:+.4f}{flag}")
+
+        # ── Summary ──
+        print(f"\n  ── Key observations ──")
+        hr5 = labels_np[hi5].mean()
+        lr10 = labels_np[lo10].mean()
+        print(f"  Label rate:    hi5={hr5:.4f}  lo10={lr10:.4f}")
+        if hr5 > lr10 + 0.05:
+            print(f"  → Top-5% errors have HIGHER pos rate — model under-predicts positives")
+            print(f"    These are hard-to-find converters.")
+        elif hr5 < lr10 - 0.05:
+            print(f"  → Top-5% errors have LOWER pos rate — model over-predicts on negatives")
+        else:
+            print(f"  → Pos rate balanced across error groups.")
+
+        pred_hi5 = probs[hi5].mean()
+        pred_lo10 = probs[lo10].mean()
+        if pred_hi5 > pred_lo10 + 0.05:
+            print(f"  Prediction gap: hi5 pred={pred_hi5:.4f} >> lo10 pred={pred_lo10:.4f}")
+            print(f"  → Errors concentrated on high-prob samples — poorly calibrated at high confidence")
+        print("=" * 72)
+        print()
+        self.model.train()
 
     def _diagnose_ns_embeddings(self) -> None:
         """NS Tokenizer fidelity diagnosis: LR AUC on raw embeddings vs raw values.
