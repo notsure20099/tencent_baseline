@@ -544,6 +544,17 @@ Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
         根因: _embed_seq_domain 将 fid_embedding + time_embedding 焊死在同一向量，
         MeanPool 后时间信号不灭，Q 中时间占比远大于内容 → loss 忽略内容。
       → 诞生 Exp41: 时-空解耦。
+  29.（Exp41 ★终判）6 个时-空解耦优化 (源头分离+双Q+双路径+gate_fusion
+        +item_scale+weighted_pool)，3 个 epoch 所有 content 路径参数全部冻结。
+        gate_fusion E1 锁死, content_item_scale 持续倒退, item_pool_weights 均匀。
+        证实: item 信号的独立预测力已被时间序列模式充分覆盖。
+        ItemBridge 的 +0.00003 = item 作为「条件变量」的唯一边际价值。
+        item 作为「独立预测变量」贡献为零。
+  30.（方法论终判）单变量 LR AUC 有效但不充分:
+        fid=5 AUC 0.67 证明了「孤立 item 特征有区分力」, 但不能证明
+        「在时间信号存在时 item 仍有区分力」。需要条件 AUC 工具。
+        下一步: Error Analysis — 不再问「什么特征有信号」, 改问
+        「什么样本时间信号不够」→ 找模型预测最差的样本子群。
 
 ═══════════════════════════════════════════════════════════════════════════════
 Exp41: Time-Content Decouple — 时-空解耦双路径架构
@@ -571,8 +582,58 @@ Exp41: Time-Content Decouple — 时-空解耦双路径架构
     - ItemBridge 保留 (use_item_bridge=True)
 
   参数增量: ~180K (第二 QueryGenerator + output_proj_content + gate_fusion)
-  Test AUC:    等待训练
-  判定:        等待结果
+
+  Exp41b 追加优化 (吸取 ItemBridge 经验):
+    (6) item_pool_weights: ItemBridge 池化从 mean→learnable softmax(4 标量)
+    (7) content_item_scale: 内容 Q 生成时 item token 信号放大 (softplus 门控)
+    (8) cudnn.benchmark: 安全速度优化
+
+  结果 (E1-E3):
+    Valid AUC: E1=0.86148  E2=0.86433  E3=0.86319
+    vs Exp29:  E1 -0.0023  E2 -0.0025  E3 -0.0040
+
+  参数轨迹 (E1→E2→E3):
+    gate_fusion norm:        4.661 → 4.658 → 4.656  ❄️ E1 锁死
+    QGen norms:     content=4.95/5.00/5.00  time=4.95/4.99/5.00  完全相等
+    content_item_scale:      1.988 → 1.984 → 1.983  ⬇️ 持续倒退
+    item_pool_weights:   [.251 .245 .258 .245] → 均匀, E2 锁死
+    time_bias seq_d:         5.52 → 8.80 → 10.59  🔥 +92%
+
+  判定:        ✗ 6 个优化全部正确实施, 但 3 个 epoch 全部冻结。
+               gate_fusion 在 E1 就锁死 — 模型不需要「内容 vs 时间」的区分。
+               content_item_scale 持续倒退 — 缩小 item 信号比放大更优。
+               item_pool_weights 均匀 — 学不到 S-tier 权重差异。
+
+  证伪的假设 (Exp38e + Exp41 联合):
+    ✗ 路径过长 (短路路径也 E2 冻结)
+    ✗ 梯度竞争 (冻结 time_bias 无增益 + 双路径无竞争仍冻结)
+    ✗ pool 压缩 (attention pool 无差异 + S-tier 加权无学习)
+    ✗ 时间污染 (从源头清洁 + 独立通道 + gate_fusion 仍无收益)
+    ✗ 信息被淹没 (content_item_scale 放大无效)
+    
+    唯一剩余答案: item 特征的独立预测信息已被时间序列模式完全覆盖。
+    ItemBridge 的 +0.00003 是 item 作为「条件变量」(调节 time_bias 强度)
+    的唯一边际价值。item 作为「独立预测变量」在此任务上无增量贡献。
+
+  Test AUC:    未提交 (E3 AUC 持续低于基线, 终止)
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp42 规划: Error Analysis — 模型预测最差样本的共同特征
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18 (规划)
+  分支:        待建 (exp42_error_analysis, 基于 Exp29)
+  背景:        20+ 实验全部失败，需要新的探索方向。
+               不再问「什么特征有信号」，改问「什么样本时间信号不够」。
+  方法:        E2 训练结束后, 在验证集上集体评估, 取 per-sample prediction
+               error top-5%/10%, 对比高 error vs 低 error 样本的分布差异。
+  分析维度:
+    M1: 时间分布 — time_bucket 熵/最新事件桶/gap 分布
+    M2: 序列属性 — 长度/密度/有效 fid 数
+    M3: item 属性 — S-tier fid 分布/NS token norm
+    M4: 用户属性 — 静态特征分布
+    M5: 模型内部 — Q token norm/CrossAttn 注意力熵
+  输出:        stdout 打印, 不写文件
+  状态:        待实现
 ═══════════════════════════════════════════════════════════════════════════════
 Test AUC 排行榜 (Exp28+)
 ═══════════════════════════════════════════════════════════════════════════════
