@@ -835,8 +835,8 @@ class PCVRHyFormerRankingTrainer:
         # Compute AUC per stage/group
         results = []
         for stage_key, data in sorted(accumulators.items()):
-            if 'labels' in data:
-                continue  # skip label-only entries
+            if set(data.keys()) == {'labels'}:
+                continue  # skip label-only entries (empty accumulators)
             for vec_key in sorted(data.keys()):
                 if vec_key == 'labels':
                     continue
