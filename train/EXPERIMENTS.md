@@ -436,20 +436,41 @@ Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
     Mean Δ > -0.02 → 假设A被推翻，embedding 保信息良好，问题在下游
     Mean Δ < -0.05 → 假设B被推翻，信息在 NS tokenizer 已丢失
 
-  结果:       等待中 (训练进行中)
-  判定:       待定
+  结果 (E1 完成后, 5063 样本, pos_rate=0.1041):
+    fid=5:  Raw 0.6699 → Emb **0.6975**  Δ=+0.0276
+    fid=6:  Raw 0.6370 → Emb **0.6926**  Δ=+0.0556
+    fid=7:  Raw 0.6097 → Emb **0.6949**  Δ=+0.0852
+    fid=8:  Raw 0.5603 → Emb **0.6152**  Δ=+0.0549
+    fid=9:  Raw 0.6039 → Emb **0.6274**  Δ=+0.0235
+    fid=10: Raw 0.6596 → Emb **0.6892**  Δ=+0.0296
+    fid=12: Raw 0.6164 → Emb **0.6758**  Δ=+0.0594
+    fid=13: Raw 0.5955 → Emb **0.6113**  Δ=+0.0158
+    fid=16: Raw 0.6007 → Emb **0.7949**  Δ=+0.1942 🔵 暴涨
+    All 9 concat LR AUC: **0.8653**
+    Mean Δ (embed - raw): **+0.0607**
 
-  后续路线图 (取决于诊断结果):
-    ┌─ 如果 Embedding AUC ≈ 原始值 AUC (假设A被推翻)
-    │    ├─ 方向 1: 双塔融合 — 内容与时间独立建模，预测层加权
-    │    ├─ 方向 2: Content-Type Bias — 在 CrossAttn softmax 入口
-    │    │           与 time_bias 并列注入 per-token-type bias
-    │    └─ 方向 3: 重新审视 feature_audit 的 A级/B级特征
-    │
-    └─ 如果 Embedding AUC ≪ 原始值 AUC (假设B被推翻)
-         ├─ 方向 1: emb_dim 提升实验 (64→128/256)
-         ├─ 方向 2: S-tier fid 独立分组 (finer ns_groups)
-         └─ 方向 3: S-tier 独立 Embedding 直连 classifier (绕过 tokenizer)
+  判定:        ✓ 假设A被推翻 — Embedding 不仅未破坏信息，还显著增强了信息。
+               (1) 全部 9 个 fid 的 Embedding AUC > 原始值 AUC，无一反例
+               (2) 64 维连续 Embedding 比离散整数 ID 更强的表达能力，这是正常的
+               (3) NS Tokenizer 入口层不是瓶颈
+               → 含此判定在内，以下 18 个实验及假设已被明确推翻:
+
+  已推翻假设全列表:
+    ┌─ 浅层:  Embedding 破坏信息 (Exp40 推翻: Δ=+0.0607)
+    ├─ 中层:  梯度路径过长造成竞争 (Exp38e 短路路径也 E2 冻结)
+    ├─ 中层:  pooling 压缩损失 (Exp38c  attention=mean无差异)
+    ├─ 中层:  梯度竞争 (Exp38d-A 冻结 time_bias 无增益)
+    ├─ 中层:  跨域交叉不足 (Exp38b Gate×Cross 仅 +0.00003)
+    ├─ 深层:  loss 不需要内容信号 (Exp38e 决定性否定)
+    └─ 深层:  所有内容架构优化均无法超越 Exp29 0.84727 (+0.00003 在噪声内)
+
+  唯一剩余方向:
+    item 特征的浅层 LR 区分力 (0.56-0.67) 已被时间序列模式充分覆盖。
+    时间信号 (time_bias + bucket embedding) 是当前任务下唯一有独立边际
+    贡献的信息源。后续实验应聚焦:
+    (1) 时间桶粒度优化 (当前 65 桶的边界分布 ≠ 数据自然聚类)
+    (2) 时间信号的非线性深化 (per-head bias 已有，但 per-block 独立学习未探索)
+    (3) 训练策略优化 (E1-E2 黄金窗口利用 / loss 重加权 / 时间信号正则化)
 
 ═══════════════════════════════════════════════════════════════════════════════
 经验教训
@@ -510,6 +531,12 @@ Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
         结果一致：内容特征无法超越时间信噪比瓶颈。唯一稳定正收益方向是
         Exp29 的 per-head time_bias。未来优化应聚焦时间表示精细化，
         不再新增内容信号路径。
+  27.（Exp40 ★最终诊断）NS Tokenizer fidelity diagnosis 用纯 numpy LR
+        对比 S-tier 9 个 item fid 的原始值 AUC 与 E1 后 Embedding 向量的 AUC，
+        全部 9 个 fid 的 Embedding AUC > 原始值（Mean Δ=+0.0607）。
+        Embedding 不仅未破坏信息，还显著增强。内容信号的消失发生在
+        Embedding 之后的 5 步压缩链路中，入口层是清白的。
+        历史修正: "token 质量低"假说被推翻——token 入口信息是健康的。
 
 ═══════════════════════════════════════════════════════════════════════════════
 Test AUC 排行榜 (Exp28+)
