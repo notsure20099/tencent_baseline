@@ -663,8 +663,9 @@ class PCVRHyFormerRankingTrainer:
                     break
                 B = batch['label'].shape[0]
                 for d in domains:
-                    all_seq_lens[d].append(batch[f'{d}_len'].cpu().numpy())
-                    all_n_events[d].append((batch[f'{d}_len'] > 0).sum(axis=1).cpu().numpy())
+                    sl = batch[f'{d}_len'].cpu().numpy()
+                    all_seq_lens[d].append(sl)
+                    all_n_events[d].append(sl)  # seq_len == n_events
                     tb_key = f'{d}_time_bucket'
                     if tb_key in batch:
                         tb_np = batch[tb_key].cpu().numpy()
