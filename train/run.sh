@@ -3,10 +3,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp41_TimeContentDecouple: time-content decoupled dual-path architecture
-#  Content Q (pure fid_embedding, no time) → content CrossAttn (no time_bias)
-#  Time Q   (fid_embedding + time_embedding) → time CrossAttn (with time_bias)
-#  Gate fusion at classifier input
+#  Exp41b_TimeContentDecouple v2:
+#   + item_pool_weights (S-tier per-group learnable weights)
+#   + content_item_scale (amplify item signal in content path Q)
+#   + cudnn.benchmark speedup
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \

@@ -273,6 +273,7 @@ class CrossAttention(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        num_item_groups: int = 0,
     ) -> None:
         super().__init__()
         self.ln_mode = ln_mode
@@ -295,6 +296,8 @@ class CrossAttention(nn.Module):
                 nn.Linear(d_model, d_model),
                 nn.Sigmoid(),
             )
+        if use_item_bridge and num_item_groups > 0:
+            self.item_pool_weights = nn.Parameter(torch.ones(num_item_groups) / num_item_groups)
 
         if use_time_bias:
             self.temporal_bias = nn.Embedding(num_time_buckets, num_heads)
@@ -329,7 +332,11 @@ class CrossAttention(nn.Module):
         residual = query
 
         if self.use_item_bridge and item_token is not None:
-            item_pooled = item_token.mean(dim=1)  # (B, D)
+            if hasattr(self, 'item_pool_weights'):
+                w = F.softmax(self.item_pool_weights, dim=0).view(1, -1, 1)
+                item_pooled = (item_token * w).sum(dim=1)  # (B, D)
+            else:
+                item_pooled = item_token.mean(dim=1)  # (B, D)
             gate = self.item_gate(item_pooled)     # (B, D)
             gate = gate.unsqueeze(1)               # (B, 1, D)
             query = query + gate * item_pooled.unsqueeze(1)
@@ -931,6 +938,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        num_item_groups: int = 0,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -959,6 +967,7 @@ class MultiSeqHyFormerBlock(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                num_item_groups=num_item_groups,
             )
             for _ in range(num_sequences)
         ])
@@ -1408,6 +1417,12 @@ class PCVRHyFormer(nn.Module):
         # Total NS token count
         self.num_ns = (num_user_ns + (self.dense_token_groups if self.has_user_dense else 0)
                        + num_item_ns + (1 if self.has_item_dense else 0))
+        self._num_user_ns = num_user_ns
+        self._num_item_ns = num_item_ns
+        self._num_item_groups = len(item_ns_groups)
+
+        # Exp41b: learnable content-path item amplification
+        self.content_item_scale = nn.Parameter(torch.tensor(0.5))
 
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
         T = num_queries * self.num_sequences + self.num_ns
@@ -1509,6 +1524,7 @@ class PCVRHyFormer(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                num_item_groups=self._num_item_groups,
             )
             for _ in range(num_hyformer_blocks)
         ])
@@ -1919,6 +1935,13 @@ class PCVRHyFormer(nn.Module):
             ns_parts.append(item_dense_tok)
         ns_tokens = torch.cat(ns_parts, dim=1)
 
+        # Exp41b: content path gets amplified item signal
+        item_scale = 1.0 + F.softplus(self.content_item_scale)
+        item_start = self._num_user_ns + self.dense_token_groups
+        item_end = item_start + self._num_item_ns
+        ns_tokens_content = ns_tokens.clone()
+        ns_tokens_content[:, item_start:item_end, :] *= item_scale
+
         # 2. Embed sequences: content-only (no time_embedding) and mixed (with time)
         seq_content_list = []
         seq_mixed_list = []
@@ -1943,9 +1966,9 @@ class PCVRHyFormer(nn.Module):
             seq_masks_list.append(mask)
             seq_time_buckets_list.append(inputs.seq_time_buckets[domain])
 
-        # 3. Content Q: from ns + content-only seq
+        # 3. Content Q: from amplified ns + content-only seq
         q_content_list = self.query_generator_content(
-            ns_tokens, seq_content_list, seq_masks_list,
+            ns_tokens_content, seq_content_list, seq_masks_list,
             dense_tokens=dense_tokens if self.dense_aware_qgen else None,
         )
         # Time Q: from ns + mixed seq (Exp29 path, preserved)

@@ -239,6 +239,7 @@ def main() -> None:
     # Initialize logger and RNG.
     set_seed(args.seed)
     create_logger(os.path.join(args.log_dir, 'train.log'))
+    torch.backends.cudnn.benchmark = True
     logging.info(f"Args: {vars(args)}")
 
     from torch.utils.tensorboard import SummaryWriter

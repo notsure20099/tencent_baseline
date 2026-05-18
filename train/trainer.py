@@ -568,6 +568,22 @@ class PCVRHyFormerRankingTrainer:
             qgc_norm = sum(float(p.norm()) for p in qgc.parameters()) / max(1, len(list(qgc.parameters())))
             qgt_norm = sum(float(p.norm()) for p in qgt.parameters()) / max(1, len(list(qgt.parameters())))
             logging.info(f"[Monitor] QGen norms  content={qgc_norm:.2f}  time={qgt_norm:.2f}")
+
+            # Content item scale
+            if hasattr(raw, 'content_item_scale'):
+                cs = float(F.softplus(raw.content_item_scale))
+                logging.info(f"[Monitor] content_item_scale (1+softplus)={1.0+cs:.3f}")
+
+        # ItemBridge pool weights
+        if hasattr(raw, 'blocks') and len(raw.blocks) > 0:
+            block0 = raw.blocks[0]
+            if hasattr(block0, 'cross_attns'):
+                ca0 = block0.cross_attns[0]
+                if hasattr(ca0, 'item_pool_weights'):
+                    pw = F.softmax(ca0.item_pool_weights, dim=0).detach()
+                    pw_str = " ".join(f"{x:.3f}" for x in pw.tolist())
+                    logging.info(f"[Monitor] item_pool_weights softmax=[{pw_str}]")
+
         if hasattr(raw, 'blocks') and len(raw.blocks) > 0:
             block0 = raw.blocks[0]
             mixer = block0.mixer
