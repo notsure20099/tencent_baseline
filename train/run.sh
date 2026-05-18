@@ -3,10 +3,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp40_ChainDiag: Full-chain S-tier fidelity diagnosis (1/3 data for fast E1)
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
+    --train_ratio 0.33 \
     --ns_tokenizer_type group \
     --ns_groups_json "${SCRIPT_DIR}/ns_groups.json" \
     --num_queries 1 \
