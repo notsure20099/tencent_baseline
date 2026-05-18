@@ -3,7 +3,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp42_ErrorAnalysis: Exp29 + E2后错误样本分析
+#  Runs 2 epochs, then profiles worst-predicted samples
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \

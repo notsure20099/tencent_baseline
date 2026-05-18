@@ -380,7 +380,7 @@ class PCVRHyFormerRankingTrainer:
                 # Step-level validation (only when eval_every_n_steps > 0).
                 if self.eval_every_n_steps > 0 and total_step % self.eval_every_n_steps == 0:
                     logging.info(f"Evaluating at step {total_step}")
-                    val_auc, val_logloss = self.evaluate(epoch=epoch)
+                    val_auc, val_logloss, _, _ = self.evaluate(epoch=epoch)
                     self.model.train()
 
                     logging.info(f"Step {total_step} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
@@ -397,13 +397,15 @@ class PCVRHyFormerRankingTrainer:
 
             logging.info(f"Epoch {epoch}, Average Loss: {loss_sum / len(self.train_loader)}")
 
-            val_auc, val_logloss = self.evaluate(epoch=epoch)
+            val_auc, val_logloss, probs, labels = self.evaluate(epoch=epoch)
             self.model.train()
 
             logging.info(f"Epoch {epoch} Validation | AUC: {val_auc}, LogLoss: {val_logloss}")
 
             if epoch == 1:
                 self._diagnose_ns_embeddings()
+            if epoch == 2:
+                self._diagnose_error_analysis(probs, labels)
 
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
@@ -554,7 +556,193 @@ class PCVRHyFormerRankingTrainer:
         else:
             logloss = float('inf')
 
-        return auc, logloss
+        return auc, logloss, probs, labels_np
+
+    def _diagnose_error_analysis(
+        self, probs: np.ndarray, labels_np: np.ndarray
+    ) -> None:
+        """Exp42: Profile worst-predicted samples after E2.
+        
+        Sorts validation samples by prediction error, compares top-5% and
+        top-10% worst vs best-10% across 5 dimensions. Prints to stdout.
+        """
+        if len(probs) == 0:
+            return
+
+        TOP_PCT = 0.05
+        SECOND_PCT = 0.10
+
+        # Per-sample absolute error
+        errors = np.abs(probs - labels_np.astype(np.float64))
+        N = len(errors)
+
+        # Build indices sorted by error (descending)
+        idx_sorted = np.argsort(-errors)
+        n_top5 = max(1, int(N * TOP_PCT))
+        n_top10 = max(1, int(N * SECOND_PCT))
+        n_bot10 = max(1, int(N * 0.10))
+
+        hi5 = idx_sorted[:n_top5]
+        hi10 = idx_sorted[:n_top10]
+        lo10 = idx_sorted[-n_bot10:]
+
+        # Collect per-sample metrics from valid_loader (same pass as evaluate)
+        # We don't re-run model; we collect raw feature stats from the dataset
+        # by iterating valid_loader and indexing into the sorted arrays.
+        
+        # ── M1: time_bucket stats ──
+        tb_data = {}  # domain -> {hi5_vals, lo10_vals}
+        # ── M2: seq length stats ──
+        len_data = {}
+        # ── M3: item S-tier stats ──
+        item_stats = {}
+        # ── Label stats ──
+        hi5_label = labels_np[hi5]
+        hi10_label = labels_np[hi10]
+        lo10_label = labels_np[lo10]
+        hi5_pred = probs[hi5]
+        hi10_pred = probs[hi10]
+        lo10_pred = probs[lo10]
+
+        print()
+        print("=" * 72)
+        print("  ERROR ANALYSIS (after E2 validation)")
+        print("=" * 72)
+        print(f"  Total samples: {N}  |  pos_rate: {labels_np.mean():.4f}")
+        print(f"  AUC:          {float(roc_auc_score(labels_np, probs)):.5f}" if len(np.unique(labels_np)) >= 2 else "  AUC: N/A")
+
+        # ── Error distribution ──
+        print(f"\n  ── Error distribution ──")
+        pctiles = [50, 75, 90, 95, 99]
+        ep = np.percentile(errors, pctiles)
+        print(f"  {'Pctl':>6s}  {'Error':>8s}")
+        for p, e in zip(pctiles, ep):
+            print(f"  {p:>4d}%   {e:8.4f}")
+
+        print(f"\n  ── Group-level stats ──")
+        print(f"  {'Group':>12s} {'Count':>8s} {'Label rate':>12s} {'Mean pred':>10s} {'Mean error':>10s}")
+        for name, ids in [("top-5%", hi5), ("top-10%", hi10), ("best-10%", lo10)]:
+            print(f"  {name:>12s} {len(ids):>8d} {labels_np[ids].mean():>12.4f} {probs[ids].mean():>10.4f} {errors[ids].mean():>10.4f}")
+
+        # ── M1: Time-bucket profile from raw dataset ──
+        print(f"\n  ── M1: Time-bucket profile (latest bucket per domain) ──")
+        logging.info("[DIAG-ERR] Collecting per-sample time_bucket stats from valid_loader...")
+        raw_model = getattr(self.model, '_orig_mod', self.model)
+        domains = self.valid_loader.dataset.seq_domains
+        n_domains = len(domains)
+
+        # Collect per-sample seq_len and latest time_bucket
+        all_seq_lens = {d: [] for d in domains}
+        all_latest_tb = {d: [] for d in domains}
+        all_n_events = {d: [] for d in domains}
+        collected = 0
+        DIAG_MAX = min(N, 20000)
+        with torch.no_grad():
+            for batch in self.valid_loader:
+                if collected >= DIAG_MAX:
+                    break
+                B = batch['label'].shape[0]
+                for d in domains:
+                    lens = batch[f'{d}_len'].numpy().astype(np.int64)
+                    all_seq_lens[d].append(lens)
+                    tb = batch.get(f'{d}_time_bucket')
+                    if tb is not None:
+                        tb_np = tb.numpy().astype(np.int64)
+                        for b in range(B):
+                            active = tb_np[b] > 0
+                            n_events = int(active.sum())
+                            all_n_events[d].append(n_events)
+                            if n_events > 0:
+                                all_latest_tb[d].append(int(tb_np[b][active].min()))
+                            else:
+                                all_latest_tb[d].append(0)
+                collected += B
+
+        for d in domains:
+            sl = np.concatenate(all_seq_lens[d])[:N] if all_seq_lens[d] else np.zeros(N)
+            lt = np.array(all_latest_tb[d])[:N] if all_latest_tb[d] else np.zeros(N, dtype=np.float64)
+            ne = np.array(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
+            print(f"  {d}:")
+            for name, ids in [("hi5", hi5), ("hi10", hi10), ("lo10", lo10)]:
+                mask = ids[ids < len(sl)]
+                if len(mask) == 0:
+                    continue
+                sl_m = sl[mask].mean()
+                lt_m = lt[mask].mean() if len(lt) > 0 else 0
+                ne_m = ne[mask].mean() if len(ne) > 0 else 0
+                print(f"    {name:>6s}  seq_len={sl_m:7.1f}  latest_tb={lt_m:7.1f}  n_events={ne_m:7.1f}")
+
+        # ── M2: Sequence effective density ──
+        print(f"\n  ── M2: Global seq stats (summed over domains) ──")
+        sum_len_hi5, sum_len_lo10 = np.zeros(len(hi5)), np.zeros(len(lo10))
+        sum_evt_hi5, sum_evt_lo10 = np.zeros(len(hi5)), np.zeros(len(lo10))
+        for d in domains:
+            sl = np.concatenate(all_seq_lens[d])[:N] if all_seq_lens[d] else np.zeros(N)
+            ne = np.array(all_n_events[d])[:N] if all_n_events[d] else np.zeros(N)
+            for i_arr, ids in [(sum_len_hi5, hi5), (sum_len_lo10, lo10)]:
+                for j, idx in enumerate(ids):
+                    if idx < len(sl):
+                        i_arr[j] += sl[idx]
+            for i_arr, ids in [(sum_evt_hi5, hi5), (sum_evt_lo10, lo10)]:
+                for j, idx in enumerate(ids):
+                    if idx < len(ne):
+                        i_arr[j] += ne[idx]
+        print(f"  top-5%   total_events={sum_evt_hi5.mean():.1f}  total_length={sum_len_hi5.mean():.0f}")
+        print(f"  best-10% total_events={sum_evt_lo10.mean():.1f}  total_length={sum_len_lo10.mean():.0f}")
+
+        # ── M3: S-tier item fid distribution ──
+        print(f"\n  ── M3: S-tier item fid nz_rate ──")
+        S_TIER = {5, 6, 7, 8, 9, 10, 12, 13, 16}
+        item_schema = self.valid_loader.dataset.item_int_schema
+        fid_to_offset = {}
+        for fid, offset, length in item_schema.entries:
+            if fid in S_TIER:
+                fid_to_offset[fid] = offset
+
+        if fid_to_offset:
+            logging.info("[DIAG-ERR] Collecting item_int values from valid_loader...")
+            all_item = []
+            collected_item = 0
+            with torch.no_grad():
+                for batch in self.valid_loader:
+                    if collected_item >= DIAG_MAX:
+                        break
+                    item = batch['item_int_feats'].numpy().astype(np.int64)
+                    all_item.append(item)
+                    collected_item += item.shape[0]
+            all_item = np.concatenate(all_item, axis=0)[:N]
+
+            for fid, offset in sorted(fid_to_offset.items()):
+                col = all_item[:, offset]
+                nz_hi5 = (col[hi5[hi5 < len(col)]] > 0).mean()
+                nz_lo10 = (col[lo10[lo10 < len(col)]] > 0).mean()
+                diff = nz_hi5 - nz_lo10
+                flag = " ←" if abs(diff) > 0.02 else ""
+                print(f"  fid={fid:<4} top5% nz={nz_hi5:.4f} best10% nz={nz_lo10:.4f} diff={diff:+.4f}{flag}")
+
+        # ── Summary ──
+        print(f"\n  ── Key observations ──")
+        # Compare label rates
+        hr5 = labels_np[hi5].mean()
+        hr10 = labels_np[hi10].mean()
+        lr10 = labels_np[lo10].mean()
+        print(f"  Label rate:    hi5={hr5:.4f}  hi10={hr10:.4f}  lo10={lr10:.4f}")
+        if hr5 > lr10 + 0.05:
+            print(f"  → Top-5% errors have HIGHER pos rate — model under-predicts positives")
+            print(f"    These are hard-to-find converters.")
+        elif hr5 < lr10 - 0.05:
+            print(f"  → Top-5% errors have LOWER pos rate — model over-predicts on negatives")
+            print(f"    These are false-alarm non-converters.")
+        else:
+            print(f"  → Pos rate balanced across error groups.")
+        
+        pred_hi5 = probs[hi5].mean()
+        pred_lo10 = probs[lo10].mean()
+        if pred_hi5 > pred_lo10 + 0.05:
+            print(f"  Prediction gap: hi5 pred={pred_hi5:.4f} >> lo10 pred={pred_lo10:.4f}")
+            print(f"  → Errors concentrated on high-prob samples — model is poorly calibrated at high confidence")
+        print("=" * 72)
+        print()
 
     def _evaluate_step(
         self, batch: Dict[str, Any]
