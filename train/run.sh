@@ -12,7 +12,7 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_groups_json "${SCRIPT_DIR}/ns_groups.json" \
     --num_queries 1 \
     --emb_skip_threshold 1000000 \
-    --num_workers 8 \
+    --num_workers 0 \
     --label_smoothing 0.05 \
     --warmup_steps 400 \
     --dropout_rate 0.1 \
