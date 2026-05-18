@@ -1472,8 +1472,18 @@ class PCVRHyFormer(nn.Module):
             self.time_embedding = nn.Embedding(num_time_buckets, d_model, padding_idx=0)
 
         # ================== HyFormer Components ==================
-        # MultiSeqQueryGenerator
+        # MultiSeqQueryGenerator — time path (current Exp29, preserved exactly)
         self.query_generator = MultiSeqQueryGenerator(
+            d_model=d_model,
+            num_ns=self.num_ns,
+            num_queries=num_queries,
+            num_sequences=self.num_sequences,
+            hidden_mult=hidden_mult,
+            num_dense_tokens=self.dense_token_groups if self.dense_aware_qgen else 0,
+        )
+
+        # Second QueryGenerator — content-only path (Exp41: time-content decoupling)
+        self.query_generator_content = MultiSeqQueryGenerator(
             d_model=d_model,
             num_ns=self.num_ns,
             num_queries=num_queries,
@@ -1511,16 +1521,26 @@ class PCVRHyFormer(nn.Module):
         else:
             self.rotary_emb = None
 
-        # Output projection
+        # Output projection — times 2 for dual path (content + time)
         self.output_proj = nn.Sequential(
             nn.Linear(num_queries * self.num_sequences * d_model, d_model),
+            nn.LayerNorm(d_model),
+        )
+        self.output_proj_content = nn.Sequential(
+            nn.Linear(num_queries * self.num_sequences * d_model, d_model),
+            nn.LayerNorm(d_model),
+        )
+
+        # Gate fusion: learnable balance between content and time paths
+        self.gate_fusion = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
             nn.LayerNorm(d_model),
         )
 
         # Dropout
         self.emb_dropout = nn.Dropout(dropout_rate)
 
-        # Classifier
+        # Classifier — input dim doubled (content + time path outputs)
         self.clsfier = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
@@ -1666,14 +1686,19 @@ class PCVRHyFormer(nn.Module):
         is_id: List[bool],
         emb_index: List[int],
         time_bucket_ids: torch.Tensor,
+        add_time: bool = True,
     ) -> torch.Tensor:
-        """Embeds a sequence domain by concatenating sideinfo embeddings and projecting to d_model."""
+        """Embeds a sequence domain.
+
+        Args:
+            add_time: if False, skip time_embedding injection (used for
+                content-only Q generation in time-content decoupling).
+        """
         B, S, L = seq.shape
         emb_list = []
         for i in range(S):
             real_idx = emb_index[i] if i < len(emb_index) else -1
             if real_idx == -1:
-                # Feature skipped by emb_skip_threshold: output zero vector
                 emb_list.append(seq.new_zeros(B, L, self.emb_dim, dtype=torch.float))
             else:
                 emb = sideinfo_embs[real_idx]
@@ -1684,8 +1709,7 @@ class PCVRHyFormer(nn.Module):
         cat_emb = torch.cat(emb_list, dim=-1)  # (B, L, S*emb_dim)
         token_emb = F.gelu(proj(cat_emb))  # (B, L, D)
 
-        # Add time bucket embedding (all-zero ids produce zero vectors via padding_idx=0)
-        if self.num_time_buckets > 0:
+        if add_time and self.num_time_buckets > 0:
             token_emb = token_emb + self.time_embedding(time_bucket_ids)
 
         return token_emb
@@ -1751,71 +1775,202 @@ class PCVRHyFormer(nn.Module):
 
         return output
 
-    def forward(self, inputs: ModelInput) -> torch.Tensor:
-        """Runs the forward pass of the PCVRHyFormer model."""
-        # 1. NS tokens: grouped projection
-        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)   # (B, num_user_groups, D)
-        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)   # (B, num_item_groups, D)
+    def _run_multi_seq_blocks_dual(
+        self,
+        q_content_list: list,
+        q_time_list: list,
+        ns_tokens: torch.Tensor,
+        seq_tokens_list: list,
+        seq_content_list: list,
+        seq_masks_list: list,
+        apply_dropout: bool = True,
+        item_tokens: Optional[torch.Tensor] = None,
+        seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Runs dual-path block stack and returns (output_content, output_time)."""
+        if apply_dropout:
+            q_content_list = [self.emb_dropout(q) for q in q_content_list]
+            q_time_list = [self.emb_dropout(q) for q in q_time_list]
+            ns_tokens = self.emb_dropout(ns_tokens)
+            seq_tokens_list = [self.emb_dropout(s) for s in seq_tokens_list]
+            seq_content_list = [self.emb_dropout(s) for s in seq_content_list]
 
-        item_tokens = item_ns  # item-identity for cross-attn bridging
+        # Both paths share same seq_encoders, but different Q and different K/V
+        curr_qs_c = q_content_list
+        curr_qs_t = q_time_list
+        curr_ns = ns_tokens
+        curr_seqs = seq_tokens_list
+        curr_seqs_c = seq_content_list
+        curr_masks = seq_masks_list
+
+        use_time = seq_time_buckets_list is not None
+
+        for block in self.blocks:
+            rope_cos_list = None
+            rope_sin_list = None
+            if self.rotary_emb is not None:
+                rope_cos_list = []
+                rope_sin_list = []
+                device = curr_seqs[0].device
+                for seq_i in curr_seqs:
+                    seq_len = seq_i.shape[1]
+                    cos, sin = self.rotary_emb(seq_len, device)
+                    rope_cos_list.append(cos)
+                    rope_sin_list.append(sin)
+
+            # ── Content path: Q_content × seq_content, NO time_bias ──
+            curr_qs_c, curr_ns, curr_seqs_c, curr_masks = block(
+                q_tokens_list=curr_qs_c,
+                ns_tokens=curr_ns,
+                seq_tokens_list=curr_seqs_c,
+                seq_padding_masks=curr_masks,
+                rope_cos_list=rope_cos_list,
+                rope_sin_list=rope_sin_list,
+                item_tokens=item_tokens,
+                seq_time_buckets_list=None,  # no time_bias for content path
+            )
+
+            # ── Time path: Q_time × seq_mixed, WITH time_bias ──
+            curr_qs_t, curr_ns, curr_seqs, curr_masks = block(
+                q_tokens_list=curr_qs_t,
+                ns_tokens=curr_ns,
+                seq_tokens_list=curr_seqs,
+                seq_padding_masks=curr_masks,
+                rope_cos_list=rope_cos_list,
+                rope_sin_list=rope_sin_list,
+                item_tokens=item_tokens,
+                seq_time_buckets_list=seq_time_buckets_list if use_time else None,
+            )
+
+        B = curr_qs_c[0].shape[0]
+        # Content output
+        all_q_c = torch.cat(curr_qs_c, dim=1)  # (B, Nq*S, D)
+        output_c = self.output_proj_content(all_q_c.view(B, -1))  # (B, D)
+        # Time output
+        all_q_t = torch.cat(curr_qs_t, dim=1)  # (B, Nq*S, D)
+        output_t = self.output_proj(all_q_t.view(B, -1))  # (B, D)
+
+        return output_c, output_t
+
+    def _run_single_path(
+        self,
+        q_tokens_list: list,
+        ns_tokens: torch.Tensor,
+        seq_tokens_list: list,
+        seq_masks_list: list,
+        apply_dropout: bool = True,
+        item_tokens: Optional[torch.Tensor] = None,
+        seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Legacy single-path runner (used for inference backward compat)."""
+        if apply_dropout:
+            q_tokens_list = [self.emb_dropout(q) for q in q_tokens_list]
+            ns_tokens = self.emb_dropout(ns_tokens)
+            seq_tokens_list = [self.emb_dropout(s) for s in seq_tokens_list]
+
+        curr_qs = q_tokens_list
+        curr_ns = ns_tokens
+        curr_seqs = seq_tokens_list
+        curr_masks = seq_masks_list
+
+        for block in self.blocks:
+            rope_cos_list = None
+            rope_sin_list = None
+            if self.rotary_emb is not None:
+                rope_cos_list = []
+                rope_sin_list = []
+                device = curr_seqs[0].device
+                for seq_i in curr_seqs:
+                    seq_len = seq_i.shape[1]
+                    cos, sin = self.rotary_emb(seq_len, device)
+                    rope_cos_list.append(cos)
+                    rope_sin_list.append(sin)
+
+            curr_qs, curr_ns, curr_seqs, curr_masks = block(
+                q_tokens_list=curr_qs,
+                ns_tokens=curr_ns,
+                seq_tokens_list=curr_seqs,
+                seq_padding_masks=curr_masks,
+                rope_cos_list=rope_cos_list,
+                rope_sin_list=rope_sin_list,
+                item_tokens=item_tokens,
+                seq_time_buckets_list=seq_time_buckets_list,
+            )
+
+        B = curr_qs[0].shape[0]
+        all_q = torch.cat(curr_qs, dim=1)
+        return self.output_proj(all_q.view(B, -1))
+
+    def forward(self, inputs: ModelInput) -> torch.Tensor:
+        """Exp41: time-content decoupled dual-path forward."""
+        # 1. NS tokens
+        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
+        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
+        item_tokens = item_ns
 
         dense_tokens = None
         ns_parts = [user_ns]
         if self.has_user_dense:
-            dense_tokens = self._project_dense(inputs.user_dense_feats)  # (B, K, D)
+            dense_tokens = self._project_dense(inputs.user_dense_feats)
             ns_parts.append(dense_tokens)
         ns_parts.append(item_ns)
         if self.has_item_dense:
-            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)  # (B, 1, D)
+            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
             ns_parts.append(item_dense_tok)
+        ns_tokens = torch.cat(ns_parts, dim=1)
 
-        ns_tokens = torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
-
-        # 2. Embed each sequence domain (dynamic)
-        seq_tokens_list = []
+        # 2. Embed sequences: content-only (no time_embedding) and mixed (with time)
+        seq_content_list = []
+        seq_mixed_list = []
         seq_masks_list = []
         seq_time_buckets_list = []
         for domain in self.seq_domains:
-            tokens = self._embed_seq_domain(
+            # Content-only seq tokens (no time_embedding)
+            tokens_c = self._embed_seq_domain(
+                inputs.seq_data[domain],
+                self._seq_embs[domain], self._seq_proj[domain],
+                self._seq_is_id[domain], self._seq_emb_index[domain],
+                inputs.seq_time_buckets[domain], add_time=False)
+            seq_content_list.append(tokens_c)
+            # Mixed seq tokens (with time_embedding, current behavior)
+            tokens_m = self._embed_seq_domain(
                 inputs.seq_data[domain],
                 self._seq_embs[domain], self._seq_proj[domain],
                 self._seq_is_id[domain], self._seq_emb_index[domain],
                 inputs.seq_time_buckets[domain])
-            seq_tokens_list.append(tokens)
+            seq_mixed_list.append(tokens_m)
             mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
             seq_masks_list.append(mask)
             seq_time_buckets_list.append(inputs.seq_time_buckets[domain])
 
-        # 3. Generate independent Q tokens per sequence via MultiSeqQueryGenerator
-        q_tokens_list = self.query_generator(
-            ns_tokens, seq_tokens_list, seq_masks_list,
+        # 3. Content Q: from ns + content-only seq
+        q_content_list = self.query_generator_content(
+            ns_tokens, seq_content_list, seq_masks_list,
+            dense_tokens=dense_tokens if self.dense_aware_qgen else None,
+        )
+        # Time Q: from ns + mixed seq (Exp29 path, preserved)
+        q_time_list = self.query_generator(
+            ns_tokens, seq_mixed_list, seq_masks_list,
             dense_tokens=dense_tokens if self.dense_aware_qgen else None,
         )
 
-        # 4. Dropout + MultiSeqHyFormerBlock stack + output projection
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+        # 4. Dual-path block stack
+        output_c, output_t = self._run_multi_seq_blocks_dual(
+            q_content_list, q_time_list, ns_tokens,
+            seq_mixed_list, seq_content_list, seq_masks_list,
             apply_dropout=self.training,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
         )
 
-        # 5. Classifier
-        logits = self.clsfier(output)  # (B, action_num)
+        # 5. Gate fusion + classifier
+        fused = self.gate_fusion(torch.cat([output_c, output_t], dim=-1))  # (B, D)
+        logits = self.clsfier(fused)
         return logits
 
     def predict(self, inputs: ModelInput,
                 return_ns_raw: bool = False):
-        """Runs inference without dropout, returning both logits and embeddings.
-
-        Args:
-            inputs: model input batch.
-            return_ns_raw: if True, also return per-fid raw NS embeddings.
-
-        Returns:
-            (logits, output) if return_ns_raw=False,
-            (logits, output, user_raw, item_raw) if return_ns_raw=True.
-        """
+        """Exp41: time-content decoupled dual-path inference."""
         if return_ns_raw:
             user_ns, user_raw = self.user_ns_tokenizer(
                 inputs.user_int_feats, return_raw_embeddings=True)
@@ -1826,47 +1981,59 @@ class PCVRHyFormer(nn.Module):
             item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
             user_raw = item_raw = None
 
-        item_tokens = item_ns  # item-identity for cross-attn bridging
+        item_tokens = item_ns
 
         dense_tokens = None
         ns_parts = [user_ns]
         if self.has_user_dense:
-            dense_tokens = self._project_dense(inputs.user_dense_feats)  # (B, K, D)
+            dense_tokens = self._project_dense(inputs.user_dense_feats)
             ns_parts.append(dense_tokens)
         ns_parts.append(item_ns)
         if self.has_item_dense:
             item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
             ns_parts.append(item_dense_tok)
-
         ns_tokens = torch.cat(ns_parts, dim=1)
 
-        seq_tokens_list = []
+        seq_content_list = []
+        seq_mixed_list = []
         seq_masks_list = []
         seq_time_buckets_list = []
         for domain in self.seq_domains:
-            tokens = self._embed_seq_domain(
+            tokens_c = self._embed_seq_domain(
+                inputs.seq_data[domain],
+                self._seq_embs[domain], self._seq_proj[domain],
+                self._seq_is_id[domain], self._seq_emb_index[domain],
+                inputs.seq_time_buckets[domain], add_time=False)
+            seq_content_list.append(tokens_c)
+            tokens_m = self._embed_seq_domain(
                 inputs.seq_data[domain],
                 self._seq_embs[domain], self._seq_proj[domain],
                 self._seq_is_id[domain], self._seq_emb_index[domain],
                 inputs.seq_time_buckets[domain])
-            seq_tokens_list.append(tokens)
+            seq_mixed_list.append(tokens_m)
             mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
             seq_masks_list.append(mask)
             seq_time_buckets_list.append(inputs.seq_time_buckets[domain])
 
-        q_tokens_list = self.query_generator(
-            ns_tokens, seq_tokens_list, seq_masks_list,
+        q_content_list = self.query_generator_content(
+            ns_tokens, seq_content_list, seq_masks_list,
+            dense_tokens=dense_tokens if self.dense_aware_qgen else None,
+        )
+        q_time_list = self.query_generator(
+            ns_tokens, seq_mixed_list, seq_masks_list,
             dense_tokens=dense_tokens if self.dense_aware_qgen else None,
         )
 
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+        output_c, output_t = self._run_multi_seq_blocks_dual(
+            q_content_list, q_time_list, ns_tokens,
+            seq_mixed_list, seq_content_list, seq_masks_list,
             apply_dropout=False,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
         )
 
-        logits = self.clsfier(output)
+        fused = self.gate_fusion(torch.cat([output_c, output_t], dim=-1))
+        logits = self.clsfier(fused)
         if return_ns_raw:
-            return logits, output, user_raw, item_raw
-        return logits, output
+            return logits, fused, user_raw, item_raw
+        return logits, fused

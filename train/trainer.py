@@ -554,6 +554,40 @@ class PCVRHyFormerRankingTrainer:
         else:
             logloss = float('inf')
 
+        # ── Exp41 Monitoring: time-content decoupling ──
+        raw = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
+        if hasattr(raw, 'gate_fusion') and hasattr(raw, 'output_proj_content'):
+            # Gate fusion weight norms
+            gf = raw.gate_fusion[0]
+            gfn = float(gf.weight.norm())
+            logging.info(f"[Monitor] gate_fusion norm={gfn:.3f}")
+
+            # Content vs Time Q Generator norms
+            qgc = raw.query_generator_content
+            qgt = raw.query_generator
+            qgc_norm = sum(float(p.norm()) for p in qgc.parameters()) / max(1, len(list(qgc.parameters())))
+            qgt_norm = sum(float(p.norm()) for p in qgt.parameters()) / max(1, len(list(qgt.parameters())))
+            logging.info(f"[Monitor] QGen norms  content={qgc_norm:.2f}  time={qgt_norm:.2f}")
+        if hasattr(raw, 'blocks') and len(raw.blocks) > 0:
+            block0 = raw.blocks[0]
+            mixer = block0.mixer
+            rm_mode = mixer.mode if hasattr(mixer, 'mode') else 'unknown'
+            T_val = mixer.T if hasattr(mixer, 'T') else raw.num_ns + raw.num_queries * raw.num_sequences
+            logging.info(f"[Monitor] RankMixer mode={rm_mode} T={T_val} d_model={raw.d_model}")
+            if hasattr(block0, 'cross_attns'):
+                for ca_idx, ca in enumerate(block0.cross_attns):
+                    if hasattr(ca, 'use_time_bias') and ca.use_time_bias:
+                        tb = ca.temporal_bias.weight.detach()
+                        dm = {0: 'seq_a', 1: 'seq_b', 2: 'seq_c', 3: 'seq_d'}
+                        d = dm.get(ca_idx, f'ca_{ca_idx}')
+                        logging.info(f"[Monitor] time_bias {d} norm={float(tb.norm()):.3f} mean={float(tb[1:].mean()):+.3f}")
+            if len(probs) > 0 and len(np.unique(labels_np)) >= 2:
+                pos = probs[labels_np == 1]
+                neg = probs[labels_np == 0]
+                sep = (float(pos.mean()) - float(neg.mean())) / max((float(pos.std()) + float(neg.std())) / 2, 1e-9)
+                logging.info(f"[Monitor] pred pos={float(pos.mean()):.3f}+-{float(pos.std()):.3f} "
+                             f"neg={float(neg.mean()):.3f}+-{float(neg.std()):.3f} sep={sep:.2f}")
+
         return auc, logloss
 
     def _evaluate_step(

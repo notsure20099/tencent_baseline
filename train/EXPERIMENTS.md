@@ -537,7 +537,42 @@ Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
         Embedding 不仅未破坏信息，还显著增强。内容信号的消失发生在
         Embedding 之后的 5 步压缩链路中，入口层是清白的。
         历史修正: "token 质量低"假说被推翻——token 入口信息是健康的。
+  28.（Exp40 ★全链路诊断）5 阶段逐层 LR AUC 揭示：
+        item_ns(I2) 0.7446 → Q_token 0.8614 → decoded_Q 0.8614 → boosted_Q 0.8620
+        Q 生成阶段凭空跃升 +0.1168，该增益来自 time_embedding 混入的 seq token。
+        内容信号在 Embedding 后保留完好（0.74），但 Q token 被时间信号淹没（0.86）。
+        根因: _embed_seq_domain 将 fid_embedding + time_embedding 焊死在同一向量，
+        MeanPool 后时间信号不灭，Q 中时间占比远大于内容 → loss 忽略内容。
+      → 诞生 Exp41: 时-空解耦。
 
+═══════════════════════════════════════════════════════════════════════════════
+Exp41: Time-Content Decouple — 时-空解耦双路径架构
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  分支:        exp41_time_content_decouple
+  基线:        Exp29 (Test AUC 0.84727)
+  背景:        Exp40 全链路诊断证实: Q token 中时间信号占比碾压内容。
+               之前 20 个实验全部失败不是路径长、不是梯度竞争、不是 pool 压缩，
+               是因为时间和内容被焊死在同一个 Q token 里。
+  改动:
+    (1) _embed_seq_domain: 新增 add_time=False → 纯内容 seq (无 time_embedding)
+    (2) 第二 QueryGenerator (query_generator_content): 从纯内容 seq 生成 Q_content
+    (3) _run_multi_seq_blocks_dual: 双路径 block 执行
+        - Content 路径: Q_content × seq_content, NO time_bias
+        - Time 路径:   Q_time × seq_mixed, WITH time_bias (Exp29 不变)
+    (4) 独立 output_proj (content + time) + gate_fusion(concat) → classifier
+    (5) 监控: gate_fusion norm, QGen norms, time_bias, sep
+
+  关键特性:
+    - Exp29 的时间通路完整保留 (Q_time + time_bias), 零变更
+    - Content 路径的 Q 从源头就是纯内容, 不再被时间污染
+    - gate_fusion 学习分配内容 vs 时间的信任度
+    - 共用 seq_encoders (transformer), 独立 CrossAttn + Mixer
+    - ItemBridge 保留 (use_item_bridge=True)
+
+  参数增量: ~180K (第二 QueryGenerator + output_proj_content + gate_fusion)
+  Test AUC:    等待训练
+  判定:        等待结果
 ═══════════════════════════════════════════════════════════════════════════════
 Test AUC 排行榜 (Exp28+)
 ═══════════════════════════════════════════════════════════════════════════════

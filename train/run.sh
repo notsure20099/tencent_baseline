@@ -3,7 +3,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp41_TimeContentDecouple: time-content decoupled dual-path architecture
+#  Content Q (pure fid_embedding, no time) → content CrossAttn (no time_bias)
+#  Time Q   (fid_embedding + time_embedding) → time CrossAttn (with time_bias)
+#  Gate fusion at classifier input
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
