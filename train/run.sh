@@ -3,7 +3,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp43_PerItemTypeTimeBias: item-type-aware temporal modulation
+#  Exp29 baseline + fid=8 gated time_bias shift (8 params, no new modules)
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -19,4 +20,5 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --dense_token_groups 4 \
     --dense_aware_qgen \
     --use_time_bias \
+    --use_item_type_bias \
     "$@"

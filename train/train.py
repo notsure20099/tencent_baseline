@@ -126,6 +126,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--use_item_bridge', action='store_true', default=False,
                         help='Inject item-identity tokens into cross-attention Q '
                              'to focus retrieval on item-relevant sequence events')
+    parser.add_argument('--use_item_type_bias', action='store_true', default=False,
+                        help='Per-item-type modulation on time_bias (fid=8 sensitive). '
+                             'Adds item_type_bias Embedding(2, num_heads) that shifts '
+                             'time_bias in CrossAttention softmax based on fid=8 presence.')
     parser.add_argument('--dense_token_groups', type=int, default=1,
                         help='Number of independent projection groups for user_dense features '
                              '(1 = single token, >1 = multi-token for richer dense representation)')
@@ -328,7 +332,19 @@ def main() -> None:
         "dense_token_groups": args.dense_token_groups,
         "dense_aware_qgen": args.dense_aware_qgen,
         "use_time_bias": args.use_time_bias,
+        "use_item_type_bias": args.use_item_type_bias,
     }
+
+    if args.use_item_type_bias:
+        fid8_offset = None
+        for fid, offset, length in pcvr_dataset.item_int_schema.entries:
+            if fid == 8:
+                fid8_offset = offset
+                break
+        if fid8_offset is None:
+            raise ValueError("use_item_type_bias=True but fid=8 not found in item_int_schema")
+        model_args["item_fid8_offset"] = fid8_offset
+        logging.info(f"Item-type time_bias: fid=8 at offset={fid8_offset}")
 
     model = PCVRHyFormer(**model_args).to(args.device)
     model = torch.compile(model)

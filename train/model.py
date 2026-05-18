@@ -262,6 +262,11 @@ class CrossAttention(nn.Module):
     When ``use_time_bias=True``, a learnable per-time-bucket scalar bias is
     added to attention scores so that more recent sequence events naturally
     receive higher attention.
+
+    When ``use_item_type_bias=True``, a per-item-type modulation embedding
+    shifts the time_bias in CrossAttention softmax.  Item type is derived
+    from the presence of fid=8 in the item being predicted.  This allows
+    different item categories to have different temporal decay patterns.
     """
 
     def __init__(
@@ -273,11 +278,13 @@ class CrossAttention(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        use_item_type_bias: bool = False,
     ) -> None:
         super().__init__()
         self.ln_mode = ln_mode
         self.use_item_bridge = use_item_bridge
         self.use_time_bias = use_time_bias
+        self.use_item_type_bias = use_item_type_bias
 
         self.attn = RoPEMultiheadAttention(
             d_model=d_model,
@@ -300,6 +307,10 @@ class CrossAttention(nn.Module):
             self.temporal_bias = nn.Embedding(num_time_buckets, num_heads)
             nn.init.uniform_(self.temporal_bias.weight, -0.5, 0.5)
 
+        if use_item_type_bias:
+            self.item_type_bias = nn.Embedding(2, num_heads, padding_idx=0)
+            nn.init.zeros_(self.item_type_bias.weight)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -309,6 +320,7 @@ class CrossAttention(nn.Module):
         rope_sin: Optional[torch.Tensor] = None,
         item_token: Optional[torch.Tensor] = None,
         key_time_buckets: Optional[torch.Tensor] = None,
+        item_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Computes cross-attention between query tokens and sequence tokens.
 
@@ -322,6 +334,8 @@ class CrossAttention(nn.Module):
             key_time_buckets: (B, L), time bucket ids for each sequence
                 position. Used to look up per-position temporal bias when
                 ``use_time_bias=True``.
+            item_type_ids: (B,), LongTensor. Item type index (0 or 1).
+                Used to modulate time_bias when ``use_item_type_bias=True``.
 
         Returns:
             Output tensor of shape (B, Nq, D).
@@ -341,6 +355,9 @@ class CrossAttention(nn.Module):
         time_bias = None
         if self.use_time_bias and key_time_buckets is not None:
             time_bias = self.temporal_bias(key_time_buckets)  # (B, L, num_heads)
+            if self.use_item_type_bias and item_type_ids is not None:
+                item_mod = self.item_type_bias(item_type_ids)  # (B, num_heads)
+                time_bias = time_bias + item_mod.unsqueeze(1)  # (B, L, num_heads)
             time_bias = time_bias.transpose(1, 2)  # (B, num_heads, L)
 
         out, _ = self.attn(
@@ -931,6 +948,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        use_item_type_bias: bool = False,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -959,6 +977,7 @@ class MultiSeqHyFormerBlock(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                use_item_type_bias=use_item_type_bias,
             )
             for _ in range(num_sequences)
         ])
@@ -982,6 +1001,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         rope_sin_list: Optional[List[torch.Tensor]] = None,
         item_tokens: Optional[torch.Tensor] = None,
         seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+        item_type_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[list, torch.Tensor, list, list]:
         """Processes one multi-sequence HyFormer block step.
 
@@ -1031,6 +1051,7 @@ class MultiSeqHyFormerBlock(nn.Module):
                 rope_cos=rc, rope_sin=rs,
                 item_token=item_tokens,
                 key_time_buckets=tb,
+                item_type_ids=item_type_ids,
             )
             decoded_qs.append(decoded_q_i)
 
@@ -1319,6 +1340,8 @@ class PCVRHyFormer(nn.Module):
         dense_token_groups: int = 1,
         dense_aware_qgen: bool = False,
         use_time_bias: bool = False,
+        use_item_type_bias: bool = False,
+        item_fid8_offset: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -1335,6 +1358,8 @@ class PCVRHyFormer(nn.Module):
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
         self.use_time_bias = use_time_bias
+        self.use_item_type_bias = use_item_type_bias
+        self.item_fid8_offset = item_fid8_offset
 
         # ================== NS Tokens Construction ==================
 
@@ -1499,6 +1524,7 @@ class PCVRHyFormer(nn.Module):
                 use_item_bridge=use_item_bridge,
                 use_time_bias=use_time_bias,
                 num_time_buckets=num_time_buckets,
+                use_item_type_bias=use_item_type_bias,
             )
             for _ in range(num_hyformer_blocks)
         ])
@@ -1698,6 +1724,15 @@ class PCVRHyFormer(nn.Module):
         idx = torch.arange(max_len, device=device).unsqueeze(0)  # (1, max_len)
         return idx >= seq_len.unsqueeze(1)  # (B, max_len)
 
+    def _make_item_type_ids(self, inputs: ModelInput) -> torch.Tensor:
+        """Generates item type ids (0 or 1) based on fid=8 presence.
+
+        Returns:
+            LongTensor of shape (B,), 1 if fid=8 > 0, 0 otherwise.
+        """
+        fid8_val = inputs.item_int_feats[:, self.item_fid8_offset]
+        return (fid8_val > 0).long()
+
     def _run_multi_seq_blocks(
         self,
         q_tokens_list: list,
@@ -1707,6 +1742,7 @@ class PCVRHyFormer(nn.Module):
         apply_dropout: bool = True,
         item_tokens: Optional[torch.Tensor] = None,
         seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+        item_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Runs the multi-sequence block stack with dropout and output projection."""
         if apply_dropout:
@@ -1741,6 +1777,7 @@ class PCVRHyFormer(nn.Module):
                 rope_sin_list=rope_sin_list,
                 item_tokens=item_tokens,
                 seq_time_buckets_list=seq_time_buckets_list,
+                item_type_ids=item_type_ids,
             )
 
         # Output: concatenate all sequences' Q tokens then project via MLP
@@ -1798,6 +1835,7 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=self.training,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
+            item_type_ids=self._make_item_type_ids(inputs) if self.use_item_type_bias else None,
         )
 
         # 5. Classifier
@@ -1864,6 +1902,7 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=False,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
+            item_type_ids=self._make_item_type_ids(inputs) if self.use_item_type_bias else None,
         )
 
         logits = self.clsfier(output)

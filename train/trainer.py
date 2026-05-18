@@ -405,6 +405,8 @@ class PCVRHyFormerRankingTrainer:
             if epoch == 1:
                 self._diagnose_ns_embeddings()
 
+            self._log_item_type_bias(epoch)
+
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
@@ -568,6 +570,22 @@ class PCVRHyFormerRankingTrainer:
         logits = logits.squeeze(-1)  # (B,)
 
         return logits, label
+
+    def _log_item_type_bias(self, epoch: int) -> None:
+        raw_model = getattr(self.model, '_orig_mod', self.model)
+        if not getattr(raw_model, 'use_item_type_bias', False):
+            return
+
+        for block_idx, block in enumerate(raw_model.blocks):
+            for attn_idx, attn in enumerate(block.cross_attns):
+                if hasattr(attn, 'item_type_bias'):
+                    w = attn.item_type_bias.weight.detach().cpu().numpy()
+                    seq_name = raw_model.seq_domains[attn_idx] if attn_idx < len(raw_model.seq_domains) else f'd{attn_idx}'
+                    logging.info(
+                        f"[ItemTypeBias] B{block_idx} {seq_name}: "
+                        f"type0={w[0].tolist()} type1={w[1].tolist()} "
+                        f"norm0={np.linalg.norm(w[0]):.4f} norm1={np.linalg.norm(w[1]):.4f}"
+                    )
 
     def _diagnose_ns_embeddings(self) -> None:
         """NS Tokenizer fidelity diagnosis: LR AUC on raw embeddings vs raw values.
