@@ -1547,13 +1547,22 @@ class PCVRHyFormer(nn.Module):
         self.emb_dropout = nn.Dropout(dropout_rate)
 
         # Classifier
-        self.clsfier = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model),
-            nn.SiLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(d_model, action_num)
-        )
+        if use_item_type_bias and item_fid8_offset is not None:
+            self.clsfier = nn.Sequential(
+                nn.Linear(d_model + 1, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+                nn.Dropout(dropout_rate),
+                nn.Linear(d_model, action_num)
+            )
+        else:
+            self.clsfier = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+                nn.Dropout(dropout_rate),
+                nn.Linear(d_model, action_num)
+            )
 
         # Initialize parameters
         self._init_params()
@@ -1839,6 +1848,9 @@ class PCVRHyFormer(nn.Module):
         )
 
         # 5. Classifier
+        if self.use_item_type_bias and self.item_fid8_offset is not None:
+            fid8_flag = (inputs.item_int_feats[:, self.item_fid8_offset] > 0).float().unsqueeze(1)
+            output = torch.cat([output, fid8_flag], dim=-1)
         logits = self.clsfier(output)  # (B, action_num)
         return logits
 
@@ -1904,6 +1916,10 @@ class PCVRHyFormer(nn.Module):
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
             item_type_ids=self._make_item_type_ids(inputs) if self.use_item_type_bias else None,
         )
+
+        if self.use_item_type_bias and self.item_fid8_offset is not None:
+            fid8_flag = (inputs.item_int_feats[:, self.item_fid8_offset] > 0).float().unsqueeze(1)
+            output = torch.cat([output, fid8_flag], dim=-1)
 
         logits = self.clsfier(output)
         if return_ns_raw:
