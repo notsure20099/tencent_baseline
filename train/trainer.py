@@ -404,6 +404,7 @@ class PCVRHyFormerRankingTrainer:
 
             if epoch == 1:
                 self._diagnose_ns_embeddings()
+                self._diagnose_full_chain()
 
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
@@ -719,4 +720,178 @@ class PCVRHyFormerRankingTrainer:
             print(f"    (mean Δ = {mean_delta:+.4f})")
             print("    → Information is LOST inside NS tokenizer.")
             print("    → Consider: larger emb_dim, finer groups.")
+        print()
+
+    def _diagnose_full_chain(self) -> None:
+        """Full-chain S-tier fidelity diagnosis at every pipeline stage.
+
+        After E1, collects intermediate activations for all 4 NS item groups
+        and all 4 per-domain Q tokens at every stage:
+          Stage 1: item_ns — after GroupNSTokenizer projection (Linear+SiLU)
+          Stage 2: q_tokens — after MultiSeqQueryGenerator (before CrossAttn)
+          Stage 3: decoded_q — after CrossAttention
+          Stage 4: boosted_q — after RankMixer token mixing
+          Stage 5: output — after output_proj (before classifier)
+
+        Runs LR on each stage's vectors and compares AUC.
+        """
+        from collections import defaultdict
+
+        DIAG_MAX_SAMPLES = 5000
+
+        raw_model = getattr(self.model, '_orig_mod', self.model)
+
+        # S-tier fid → item group index mapping
+        S_TIER_GROUPS = {
+            5: ('I2', 1),
+            6: ('I2', 1),
+            7: ('I2', 1),
+            8: ('I2', 1),
+            12: ('I2', 1),
+            9: ('I4', 3),
+            10: ('I4', 3),
+            13: ('I1', 0),
+            16: ('I3', 2),
+        }
+
+        # Collect per-stage, per-item-group vectors and labels
+        # stage: 'item_ns' | 'q_d{domain}' | 'dQ_d{domain}' | 'bQ_d{domain}' | 'output'
+        accumulators: Dict[str, Dict[str, list]] = {}  # stage -> group/label_key -> []
+        all_labels = []
+
+        logging.info("[DIAG-CHAIN] Running full-chain fidelity diagnosis...")
+        processed = 0
+        with torch.no_grad():
+            for batch in self.valid_loader:
+                if processed >= DIAG_MAX_SAMPLES:
+                    break
+                model_input = self._make_model_input(self._batch_to_device(batch))
+                B = model_input.user_int_feats.shape[0]
+
+                inter = raw_model.predict(model_input, return_intermediate=True)
+
+                labels_np = batch['label'].cpu().numpy().astype(int)
+                all_labels.extend(labels_np.tolist())
+
+                # Stage 1: item_ns per group
+                item_ns_np = inter['item_ns'].cpu().numpy()  # (B, 4, 64)
+                for gname, gidx in [('I1', 0), ('I2', 1), ('I3', 2), ('I4', 3)]:
+                    stage_key = 'item_ns'
+                    if stage_key not in accumulators:
+                        accumulators[stage_key] = {'labels': all_labels}
+                    vecs_key = f'g_{gname}'
+                    accumulators[stage_key].setdefault(vecs_key, []).append(item_ns_np[:, gidx, :])
+
+                # Stage 2: q_tokens per domain
+                q_tokens_np = [q.cpu().numpy() for q in inter['q_tokens']]  # [ (B, Nq, D) x 4 ]
+                domains = raw_model.seq_domains
+                for di, dname in enumerate(domains):
+                    stage_key = f'q_d{dname}'
+                    if stage_key not in accumulators:
+                        accumulators[stage_key] = {'labels': all_labels}
+                    accumulators[stage_key].setdefault('vec', []).append(q_tokens_np[di][:, 0, :])  # Nq=1
+
+                # Stage 3 & 4: decoded_q + boosted_q per domain per block
+                for blk_idx in range(len(raw_model.blocks)):
+                    dq = inter.get(f'block{blk_idx}_decoded_q')
+                    bq = inter.get(f'block{blk_idx}_boosted_q')
+                    if dq is not None and bq is not None:
+                        dq_np = [q.cpu().numpy() for q in dq]
+                        bq_np = [q.cpu().numpy() for q in bq]
+                        for di, dname in enumerate(domains):
+                            stage_key = f'dQ_b{blk_idx}_d{dname}'
+                            if stage_key not in accumulators:
+                                accumulators[stage_key] = {'labels': all_labels}
+                            accumulators[stage_key].setdefault('vec', []).append(dq_np[di][:, 0, :])
+
+                            stage_key = f'bQ_b{blk_idx}_d{dname}'
+                            if stage_key not in accumulators:
+                                accumulators[stage_key] = {'labels': all_labels}
+                            accumulators[stage_key].setdefault('vec', []).append(bq_np[di][:, 0, :])
+
+                processed += B
+
+        logging.info(f"[DIAG-CHAIN] Collected {processed} samples, {len(accumulators)} stage/group combos")
+
+        # Build label array
+        labels_np = np.array(all_labels[:processed], dtype=np.int64)
+
+        def _lr_auc(X, y):
+            n, d = X.shape
+            xn = (X - X.mean(0)) / (X.std(0).clip(1e-8) + 1e-8)
+            w = np.zeros(d)
+            b = 0.0
+            for _ in range(300):
+                logits = np.clip(xn @ w + b, -50, 50)
+                prob = 1.0 / (1.0 + np.exp(-logits))
+                err = prob - y
+                w -= 0.1 * (xn.T @ err) / n
+                b -= 0.1 * err.mean()
+            prob = 1.0 / (1.0 + np.exp(-np.clip(xn @ w + b, -50, 50)))
+            n_pos = (y == 1).sum()
+            n_neg = (y == 0).sum()
+            if n_pos == 0 or n_neg == 0:
+                return float('nan')
+            order = np.argsort(prob)
+            rank = np.zeros(len(y))
+            rank[order] = np.arange(1, len(y) + 1)
+            return (rank[y == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+        # Compute AUC per stage/group
+        results = []
+        for stage_key, data in sorted(accumulators.items()):
+            if 'labels' in data:
+                continue  # skip label-only entries
+            for vec_key in sorted(data.keys()):
+                if vec_key == 'labels':
+                    continue
+                all_vecs = np.concatenate(data[vec_key], axis=0)[:processed]
+                auc_val = _lr_auc(all_vecs, labels_np[:len(all_vecs)])
+                results.append((stage_key, vec_key, auc_val))
+        results.sort(key=lambda r: -r[2])
+
+        print()
+        print("=" * 72)
+        print("  FULL-CHAIN S-TIER FIDELITY DIAGNOSIS (after E1)")
+        print("=" * 72)
+        print(f"  Samples: {processed}  |  pos_rate: {labels_np.mean():.4f}")
+        print("-" * 72)
+        print(f"  {'Stage':<28s} {'Group/Domain':<14s} {'LR AUC':>8s} {'Drop':>8s}")
+        print(f"  {'─' * 28} {'─' * 14} {'─' * 8} {'─' * 8}")
+
+        # Baselines for drop calculation
+        emb_baselines = {5: 0.6975, 6: 0.6926, 7: 0.6949, 8: 0.6152,
+                         9: 0.6274, 10: 0.6892, 12: 0.6758, 13: 0.6113, 16: 0.7949}
+
+        prev_best = {}  # stage -> max AUC seen so far
+        for stage_key, vec_key, auc_val in results:
+            # Determine "parent" stage for drop calc
+            desc = f"{stage_key}/{vec_key}"
+            drop_str = ""
+            prev_key = stage_key
+            if prev_key in prev_best:
+                drop = prev_best[prev_key] - auc_val
+                drop_str = f"{-drop:+.4f}" if abs(drop) > 0.001 else " ~0"
+            prev_best.setdefault(prev_key, auc_val)
+            prev_best[prev_key] = min(prev_best[prev_key], auc_val)
+
+            flag = " ★" if auc_val > 0.55 else ""
+            print(f"  {stage_key:<28s} {vec_key:<14s} {auc_val:8.4f}{drop_str:>8s}{flag}")
+
+        print("-" * 72)
+
+        # Find the loss point
+        max_stage_auc = {}
+        for stage_key, vec_key, auc_val in results:
+            max_stage_auc[stage_key] = max(max_stage_auc.get(stage_key, 0), auc_val)
+        stages_ordered = ['item_ns', 'q_dseq_a', 'q_dseq_b', 'q_dseq_c', 'q_dseq_d',
+                          'dQ_b0_dseq_a', 'dQ_b1_dseq_a', 'bQ_b0_dseq_a', 'output']
+        present_stages = [s for s in stages_ordered if s in max_stage_auc]
+        if present_stages:
+            print(f"\n  Signal flow (max per-stage AUC):")
+            for s in present_stages:
+                bar = "█" * max(1, int((max_stage_auc[s] - 0.5) * 40))
+                print(f"    {s:<30s} {max_stage_auc[s]:.4f} {bar}")
+
+        print("=" * 72)
         print()

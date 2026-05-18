@@ -1048,7 +1048,7 @@ class MultiSeqHyFormerBlock(nn.Module):
             offset += Nq
         next_ns = boosted[:, offset:, :]
 
-        return next_q_list, next_ns, next_seqs, next_masks
+        return next_q_list, next_ns, next_seqs, next_masks, decoded_qs
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1707,6 +1707,7 @@ class PCVRHyFormer(nn.Module):
         apply_dropout: bool = True,
         item_tokens: Optional[torch.Tensor] = None,
         seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
+        return_intermediate: bool = False,
     ) -> torch.Tensor:
         """Runs the multi-sequence block stack with dropout and output projection."""
         if apply_dropout:
@@ -1719,7 +1720,9 @@ class PCVRHyFormer(nn.Module):
         curr_seqs = seq_tokens_list
         curr_masks = seq_masks_list
 
-        for block in self.blocks:
+        intermediates = {} if return_intermediate else None
+
+        for blk_idx, block in enumerate(self.blocks):
             rope_cos_list = None
             rope_sin_list = None
             if self.rotary_emb is not None:
@@ -1732,7 +1735,7 @@ class PCVRHyFormer(nn.Module):
                     rope_cos_list.append(cos)
                     rope_sin_list.append(sin)
 
-            curr_qs, curr_ns, curr_seqs, curr_masks = block(
+            curr_qs, curr_ns, curr_seqs, curr_masks, decoded_qs = block(
                 q_tokens_list=curr_qs,
                 ns_tokens=curr_ns,
                 seq_tokens_list=curr_seqs,
@@ -1742,6 +1745,9 @@ class PCVRHyFormer(nn.Module):
                 item_tokens=item_tokens,
                 seq_time_buckets_list=seq_time_buckets_list,
             )
+            if return_intermediate:
+                intermediates[f'block{blk_idx}_decoded_q'] = [q.detach() for q in decoded_qs]
+                intermediates[f'block{blk_idx}_boosted_q'] = [q.detach() for q in curr_qs]
 
         # Output: concatenate all sequences' Q tokens then project via MLP
         B = curr_qs[0].shape[0]
@@ -1749,6 +1755,9 @@ class PCVRHyFormer(nn.Module):
         output = all_q.view(B, -1)  # (B, Nq*S*D)
         output = self.output_proj(output)  # (B, D)
 
+        if return_intermediate:
+            intermediates['output'] = output.detach()
+            return intermediates
         return output
 
     def forward(self, inputs: ModelInput) -> torch.Tensor:
@@ -1805,16 +1814,19 @@ class PCVRHyFormer(nn.Module):
         return logits
 
     def predict(self, inputs: ModelInput,
-                return_ns_raw: bool = False):
+                return_ns_raw: bool = False,
+                return_intermediate: bool = False):
         """Runs inference without dropout, returning both logits and embeddings.
 
         Args:
             inputs: model input batch.
             return_ns_raw: if True, also return per-fid raw NS embeddings.
+            return_intermediate: if True, return dict of all stage activations.
 
         Returns:
-            (logits, output) if return_ns_raw=False,
-            (logits, output, user_raw, item_raw) if return_ns_raw=True.
+            (logits, output) if return_ns_raw=False and return_intermediate=False,
+            (logits, output, user_raw, item_raw) if return_ns_raw=True,
+            intermediates dict if return_intermediate=True.
         """
         if return_ns_raw:
             user_ns, user_raw = self.user_ns_tokenizer(
@@ -1825,6 +1837,10 @@ class PCVRHyFormer(nn.Module):
             user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
             item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
             user_raw = item_raw = None
+
+        if return_intermediate:
+            intermediates = {}
+            intermediates['item_ns'] = item_ns.detach()
 
         item_tokens = item_ns  # item-identity for cross-attn bridging
 
@@ -1858,14 +1874,24 @@ class PCVRHyFormer(nn.Module):
             ns_tokens, seq_tokens_list, seq_masks_list,
             dense_tokens=dense_tokens if self.dense_aware_qgen else None,
         )
+        if return_intermediate:
+            intermediates['q_tokens'] = [q.detach() for q in q_tokens_list]
 
-        output = self._run_multi_seq_blocks(
+        result = self._run_multi_seq_blocks(
             q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
             apply_dropout=False,
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
+            return_intermediate=return_intermediate,
         )
 
+        if return_intermediate:
+            intermediates.update(result)  # decoded_q, boosted_q, output
+            logits = self.clsfier(intermediates['output'])
+            intermediates['logits'] = logits.detach()
+            return intermediates
+
+        output = result
         logits = self.clsfier(output)
         if return_ns_raw:
             return logits, output, user_raw, item_raw
