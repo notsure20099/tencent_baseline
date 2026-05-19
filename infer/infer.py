@@ -249,6 +249,10 @@ def load_model_state_strict(
     with a diagnostic message.
     """
     state_dict = torch.load(ckpt_path, map_location=device)
+    # Strip _orig_mod. prefix from torch.compile-wrapped checkpoints
+    _PREFIX = '_orig_mod.'
+    state_dict = {(k[len(_PREFIX):] if k.startswith(_PREFIX) else k): v
+                  for k, v in state_dict.items()}
     try:
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as e:
