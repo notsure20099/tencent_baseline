@@ -405,6 +405,8 @@ class PCVRHyFormerRankingTrainer:
             if epoch == 1:
                 self._diagnose_ns_embeddings()
 
+            self._log_time_module_norms(epoch)
+
             if self.writer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
@@ -568,6 +570,27 @@ class PCVRHyFormerRankingTrainer:
         logits = logits.squeeze(-1)  # (B,)
 
         return logits, label
+
+    def _log_time_module_norms(self, epoch: int) -> None:
+        raw_model = getattr(self.model, '_orig_mod', self.model)
+        result_parts = []
+
+        # coarse_time_bias per block per domain
+        for block_idx, block in enumerate(raw_model.blocks):
+            for attn_idx, attn in enumerate(block.cross_attns):
+                if hasattr(attn, 'coarse_time_bias'):
+                    w = attn.coarse_time_bias.weight.detach().cpu().numpy()
+                    seq_name = raw_model.seq_domains[attn_idx] if attn_idx < len(raw_model.seq_domains) else f'd{attn_idx}'
+                    result_parts.append(f"B{block_idx} {seq_name} coarse_bias_norm={np.linalg.norm(w):.3f}")
+
+        # cls_time_mlp weights
+        cls_time_norm = 0.0
+        for param in raw_model.cls_time_mlp.parameters():
+            cls_time_norm += float(param.detach().norm().cpu().item())
+        gate_val = float(raw_model.cls_time_gate.detach().cpu().item())
+        result_parts.append(f"cls_time_mlp_norm={cls_time_norm:.3f} cls_time_gate={gate_val:.4f}")
+
+        logging.info(f"E{epoch} [TIME-MOD] {' | '.join(result_parts)}")
 
     def _diagnose_ns_embeddings(self) -> None:
         """NS Tokenizer fidelity diagnosis: LR AUC on raw embeddings vs raw values.

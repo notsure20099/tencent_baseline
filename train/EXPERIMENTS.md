@@ -510,6 +510,147 @@ Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
         结果一致：内容特征无法超越时间信噪比瓶颈。唯一稳定正收益方向是
         Exp29 的 per-head time_bias。未来优化应聚焦时间表示精细化，
         不再新增内容信号路径。
+  27.（Exp40 ★最终诊断）NS Tokenizer fidelity diagnosis: 全部 9 个 S-tier fid
+        的 Embedding AUC > 原始值 AUC (Mean Δ=+0.0607)。Embedding 未破坏信息。
+        内容信号的消失发生在 Embedding 之后的压缩链路中。
+  28.（Exp40 ★全链路诊断）5 阶段逐层 LR AUC: Q 生成阶段凭空跃升 +0.1168,
+        增益来自 time_embedding 混入的 seq token。内容和时间被焊死在同一 Q 中。
+  29.（Exp41 ★终判）时-空解耦双路径架构 6 个优化全部 E1 冻结。证伪了"时间污染"
+        假说。item 的独立预测信息已被时间序列模式完全覆盖。
+        ItemBridge +0.00003 = item 作为「条件变量」的唯一边际价值。
+  30.（方法论）单变量 LR AUC 有效但不充分: fid=5 AUC 0.67 证明了孤立区分力,
+        但不能证明「在时间信号存在时 item 仍有区分力」。
+  31.（Exp42 ★方向转折）Error Analysis 发现 fid=8 的 nz_rate 在高误差样本中
+        3 倍于低误差样本 (42% vs 13%), 而 M1 时间分布完全无差异。
+        不是「时间信号不够」, 是「universal time_bias 不适用特定 item」。
+  32.（Exp43 ★方向）PerItemType TimeBias + fid8_flag: 让 time_bias 感知 item
+        差异(CrossAttention 8 params) + fid=8>0 硬特征直连 classifier(65 params)。
+        总共 73 参数, 不改架构。是 20+ 个实验后唯一同时满足: (a) 有明确实验证据、
+        (b) 沿袭已验证通路、(c) 不触碰已穷尽方向 的方案。
+  33.（Exp43 ★新设计）首次使用 0 参数 if-else 特征 (fid=8>0) 直连 classifier。
+         等价于"告诉模型这是一个困难 item"的 hard feature。
+   34.（Exp43 ★终判）item_type_bias 是第一个从 zero 学到非零且未冻结的 item 参数
+         — 但它学到的东西和 hard converters 完全正交。Valid 微涨但 Test 下降,
+         fid=8 diff 纹丝不动。item 感知可学习但无益。0.84727 是硬天花板。
+   35.（Exp44 ★新方向）时间信号多尺度 + 多层级注入: CrossAttention 同时使用
+         粗粒度 (8 buckets) 和细粒度 (65 buckets) 时间偏置, 分类器入口注入
+         显式时间统计。这是 20+ 实验后第一次从"时间表示质量"而非"内容信号"
+         角度做优化。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  分支:        exp29 (diagnosis only)
+  方法:        E1 后抽取 item S-tier 9 fid 的 64维原始 embedding, 纯 numpy LR
+  结果:        全部 9 fid Embedding AUC > Raw AUC (Mean Δ=+0.0607)
+              All 9 concat LR AUC: 0.87
+  判定:        ✓ NS tokenizer 入口清白。信息丢失发生在 Embedding 之后。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp41: Time-Content Decouple — 时-空解耦双路径
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  改动:        双 Q(纯内容+时间)、双 CrossAttn、gate_fusion、item_scale、
+               weighted_pool, 6 个优化
+  结果:        E1-E3 全部参数冻结。gate_fusion E1 锁死, content_item_scale 倒退
+  判定:        ✗ item 独立预测信息被时间充分覆盖。item 条件变量价值仅 +0.00003。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp42: Error Analysis — 找模型预测最差样本的共同特征
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-18
+  分支:        exp42_error_analysis
+  方法:        E2 后 top-5%/best-10% error 分组对比 M1 时间/M2 序列/M3 item fid
+  核心发现:    fid=8 top5% nz=42% vs best10% nz=13% (差 28.9pp)
+              M1 时间分布 hi5 vs lo10 完全零差异
+  判定:        ✓ fid=8 是 hard converters 的唯一标识。universal time_bias 不适用。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp43: PerItemType TimeBias + fid8_flag — item 感知双重机制
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-19
+  分支:        exp43_per_item_type_timebias (基于 Exp29)
+  背景:        Exp42 发现 fid=8 是 hard converter 标志。Exp41 证伪所有内容路径。
+  改动:
+    (1) CrossAttention 新增 item_type_bias Embedding(2, num_heads) zero-init
+        对 fid=8 item 的 time_bias 做加法调制 (8 params)
+    (2) classifier 输入 concat fid8_flag (fid=8>0 的 0/1 标量)
+        classifier: Linear(D+1, D) → ... (65 params)
+    (3) 每 epoch 后 error_analysis (M1/M2/M3) + item_type_bias 权重监控
+  总参数:    73 params (8 + 65)
+  设计原则:
+    - 不改架构: item_type_bias 在 CrossAttention 内并行加一行, fid8_flag 在 clsfier 前 concat
+    - 零学习负担: fid8_flag 是 hard feature, 不需从零学"item 是什么"
+    - 沿袭 Exp29 已验证通路: time_bias 继续做本职工作, item_type_bias 仅做微调
+    - 极低过拟合风险: 73 参数 vs 全模型 ~12M
+
+  结果 (E1-E15, 全量数据):
+    Valid AUC: E15=0.86757 (峰值, 接近 Exp29 0.86762)
+    Test AUC:  **0.846308**  (-0.00096 vs Exp29)
+
+    item_type_bias norm (B0_seq_d, 典型代表):
+      E4:  1.59   ← 开始学习
+      E13: 6.33   ← 4× 增长
+      E15: 7.27   ← 还在涨，从未冻结
+
+    Error Analysis 全 epoch fid=8 diff:
+      E3-E15: 0.32-0.33，纹丝不动
+      top-5% label rate: 96.3-96.6%, pred: 0.157-0.160
+
+  核心发现:
+    (1) item_type_bias 是 20+ 个实验中第一个从 zero 学到非零且未冻结的 item 参数
+    (2) 但它学到的东西和 fid=8 hard converters 完全正交 — fid=8 diff 零改善
+    (3) 学到的调制对 Valid 有微弱正收益 (+0.00047 over E4→E15)
+        但对 Test 过拟合 (-0.00096)
+    (4) Exp29 天花板定理确认: 0.84727 是当前数据+架构的硬上限
+        hard converters 不是时间/内容建模可解决的问题
+
+  判定:        ✗ item 感知参数能学到东西但无 Test 增益。
+               fid=8 32% diff 是数据本身的不可预测性, 非建模问题。
+               转向时间信号的全方位增强（多分辨率 + 分类器注入）。
+
+═══════════════════════════════════════════════════════════════════════════════
+Exp44: MultiScaleTime — 时间信号的全方位增强
+═══════════════════════════════════════════════════════════════════════════════
+  日期:        2026-05-19
+  分支:        exp44_seq_time_shortcut (基于 Exp29)
+  背景:        Exp43 证实 item 感知已穷尽。Exp29 仅有 fine time_bias (65 buckets)
+               在 CrossAttention 一层。时间信号应多尺度、多层级注入。
+  改动:
+    (1) CrossAttention 新增 coarse_time_bias Embedding(9, num_heads) padding_idx=0
+        从 fine bucket (1-64) 派生 coarse bucket: (bucket+7)//8 → 1-8
+        attn_bias = fine_bias + coarse_bias  (multi-scale fusion)
+        → 8×4=32 params per CrossAttention, ×2 blocks ×4 domains = 256 params
+    (2) 新增 cls_time_mlp: per-domain (mean_bucket, latest_bucket) × 4 domains
+        → Linear(8→64) → LayerNorm → SiLU → gate 乘 → inject before clsfier
+        cls_time_gate: zero-init scalar
+        → 8×64+64+64+64×64+64 = ~5300 params (含 classifier 不新增)
+  总参数:    ~5500 params
+  设计原则:
+    - 不改架构: coarse_bias 和 fine_bias 在 CrossAttention softmax 入口相加
+    - 最短梯度路径: cls_time_mlp 梯度 1 步到 loss
+    - 零学习负担: cls_time_gate zero-init, 初始不影响原有输出
+  监控:      每 epoch 打印 coarse_bias_norm (per-block per-domain)
+              + cls_time_mlp_norm + cls_time_gate
+  假设:       粗粒度时间模式（周/月尺度 vs 天尺度）在 CrossAttention 中互补；
+              显式时间统计（均值/最近）在 classifier 入口提供决策级时间上下文。
+  状态:       待训练
+
+═══════════════════════════════════════════════════════════════════════════════
+待实施实验组 (Exp44 之后)
+═══════════════════════════════════════════════════════════════════════════════
+  P1: 去 Q 直接 timed-pool
+      移除 Q token + CrossAttention, 用 time_bias softmax 直接加权 sum seq,
+      各域 weighted sum 通过 MLP 交互直连 classifier。
+      动机: Q token 是 Exp33/36/41 反复确认的瓶颈, 去掉它让时间信号直接生效。
+      预估参数: ~20K
+
+  P2: 序列 time-weighted pool 直连 classifier
+      在 CrossAttention 之前对 seq 做 time-weighted pooling,
+      concat 到 classifier 输入作为 skip connection。
+      动机: 原始序列信息在 5 步压缩中丢失, skip connection 类似 ResNet。
+      预估参数: ~5K
 
 ═══════════════════════════════════════════════════════════════════════════════
 Test AUC 排行榜 (Exp28+)
@@ -522,38 +663,25 @@ Test AUC 排行榜 (Exp28+)
   6  Exp28                      0.846318
   7  Exp27                      0.846090
   8  Exp37 I2Boost              0.844821
-  —  Exp38e 5×4+Shortcut        未提交 (E2参数冻结，终止)
-  —  Exp38d-A 冻结time_bias     未提交 (假说被推翻，终止)
+  —  Exp38e 5×4+Shortcut        未提交 (E2冻结，终止)
+  —  Exp38d-A 冻结time_bias     未提交 (假说推翻，终止)
   —  Exp39 time_delta+dense     未提交 (AUC低于基线，终止)
+  —  Exp41 TimeContentDecouple  未提交 (E3冻结，终止)
+  —  Exp43 PerItemTypeTimeBias  0.846308  -0.00096 vs Exp29
+  —  Exp44 MultiScaleTime       训练中
 
 ═══════════════════════════════════════════════════════════════════════════════
-当前特征全景 & 下一步方向 (Exp38e 终判后修订)
+当前全景 & 下一步方向 (Exp44 训练中)
 ═══════════════════════════════════════════════════════════════════════════════
-  有效信号 (唯一):
-    time_bias (Exp29): 唯一 +0.00095 Test 收益的改动, 路径短(1步直达softmax)
+  核心认知 (Exp43 终判):
+    item 感知参数可学习但无 Test 增益。fid=8 32% diff 是数据不可预测性。
+    时间信号是唯一持续产生独立边际贡献的信息源。
 
-  已穷尽无效的方向:
-    内容信号架构优化 ×12 (Exp20/30/31a/32/33/35/36/37/38a/38b/38c/38d-A/38e)
-      覆盖：长路径、中路径、短路径、短路、噪声压缩、S-tier增强、I2独立、
-            per-head时间注入、AttentionPooling、per-fid独立交叉
-      一致结论：架构层面内容信号优化空间已为零
+  当前实验 Exp44:
+    时间信号全方位增强: coarse_time_bias (多尺度) + cls_time_mlp (分类器注入)
+    监控:    per-epoch time_module_norms (coarse_bias + cls_time_gate)
+    假设:    粗粒度时间 + 显式时间统计 = 超越 Exp29 的 0.84727
 
-  下一步方向 (Exp40 诊断结果驱动，废弃旧 T 方案):
-    ═══ 等待 Exp40 结果 ═══
-
-    ┌─ 假设A成立 (embedding 保信息良好):
-    │    P0: 双塔融合 — 内容 MLP 塔 + 序列塔，预测层加权融合
-    │        (Exp38e 证明"架构内注入内容信号"已穷尽，唯一未尝试的是独立建模)
-    │    P1: Content-Type Bias — 模仿 time_bias 机制，在 CrossAttn softmax
-    │        入口注入 per-token-type 的可学习偏置
-    │    P2: ensembling — 多模型加权投票
-    │
-    └─ 假设B成立 (embedding 已丢信息):
-         P0: emb_dim 64→128, 重跑 diagnosis 确认恢复程度
-         P1: S-tier fid 独立 ns_group（每组 1-2 个 fid，避免组内信号稀释）
-         P2: S-tier 特征绕过 NS tokenizer，独立 Embedding 直连 classifier
-
-    不再考虑的方向:
-      ❌ 时间表示精细化 T1/T2/T3 — 不是无效，而是必须先回答 embedding 问题
-      ❌ 任何在现有架构内部注入内容的方案 — Exp38e 已为终极否定
-      ❌ 时间信息混入非时间通路
+  待 Exp44 结果决定下一步:
+    ┌─ 如果 AUC 涨 → 展开 per-layer time injection + 去 Q timed-pool
+    └─ 如果持平   → 时间增强方向关闭。P0→P1 序列结构重构

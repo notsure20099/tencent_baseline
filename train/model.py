@@ -261,8 +261,13 @@ class CrossAttention(nn.Module):
 
     When ``use_time_bias=True``, a learnable per-time-bucket scalar bias is
     added to attention scores so that more recent sequence events naturally
-    receive higher attention.
+    receive higher attention.  Additionally, a coarse-grained time bias
+    (num_coarse_buckets buckets, default 8) provides multi-scale temporal
+    context: fine buckets capture precise recency, coarse buckets capture
+    long-range temporal patterns.
     """
+
+    COARSE_BUCKET_DIVISOR = 8
 
     def __init__(
         self,
@@ -273,6 +278,7 @@ class CrossAttention(nn.Module):
         use_item_bridge: bool = False,
         use_time_bias: bool = False,
         num_time_buckets: int = 65,
+        num_coarse_buckets: int = 9,
     ) -> None:
         super().__init__()
         self.ln_mode = ln_mode
@@ -299,6 +305,8 @@ class CrossAttention(nn.Module):
         if use_time_bias:
             self.temporal_bias = nn.Embedding(num_time_buckets, num_heads)
             nn.init.uniform_(self.temporal_bias.weight, -0.5, 0.5)
+            self.coarse_time_bias = nn.Embedding(num_coarse_buckets, num_heads, padding_idx=0)
+            nn.init.normal_(self.coarse_time_bias.weight, std=0.02)
 
     def forward(
         self,
@@ -341,6 +349,9 @@ class CrossAttention(nn.Module):
         time_bias = None
         if self.use_time_bias and key_time_buckets is not None:
             time_bias = self.temporal_bias(key_time_buckets)  # (B, L, num_heads)
+            coarse_ids = ((key_time_buckets + self.COARSE_BUCKET_DIVISOR - 1) // self.COARSE_BUCKET_DIVISOR).clamp(0, 8)
+            coarse_bias = self.coarse_time_bias(coarse_ids)  # (B, L, num_heads)
+            time_bias = time_bias + coarse_bias  # multi-scale fusion
             time_bias = time_bias.transpose(1, 2)  # (B, num_heads, L)
 
         out, _ = self.attn(
@@ -1520,6 +1531,17 @@ class PCVRHyFormer(nn.Module):
         # Dropout
         self.emb_dropout = nn.Dropout(dropout_rate)
 
+        # Classifier-level time injection: per-domain time stats → d_model
+        # (mean_bucket, latest_bucket) × num_domains → MLP → inject before clsfier
+        self.num_time_stats = 2 * self.num_sequences
+        self.cls_time_mlp = nn.Sequential(
+            nn.Linear(self.num_time_stats, d_model),
+            nn.LayerNorm(d_model),
+            nn.SiLU(),
+        )
+        # Learnable gate: how much time stats to mix in
+        self.cls_time_gate = nn.Parameter(torch.zeros(1))
+
         # Classifier
         self.clsfier = nn.Sequential(
             nn.Linear(d_model, d_model),
@@ -1698,6 +1720,26 @@ class PCVRHyFormer(nn.Module):
         idx = torch.arange(max_len, device=device).unsqueeze(0)  # (1, max_len)
         return idx >= seq_len.unsqueeze(1)  # (B, max_len)
 
+    def _compute_time_stats(
+        self, seq_time_buckets_list: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """Computes per-domain time statistics for classifier injection.
+
+        For each domain: (mean_nonzero_bucket, latest_bucket).
+        Returns (B, 2*num_domains).
+        """
+        stats = []
+        for tb in seq_time_buckets_list:
+            nonzero_mask = (tb > 0).float()
+            n_nonzero = nonzero_mask.sum(dim=1).clamp(min=1)
+            mean_bucket = (tb.float() * nonzero_mask).sum(dim=1) / n_nonzero
+            latest = tb.clone().float()
+            latest[latest == 0] = float('inf')
+            latest_bucket = latest.min(dim=1).values.clamp(0, 64)
+            stats.append(mean_bucket)
+            stats.append(latest_bucket)
+        return torch.stack(stats, dim=-1)  # (B, 2*num_domains)
+
     def _run_multi_seq_blocks(
         self,
         q_tokens_list: list,
@@ -1800,7 +1842,11 @@ class PCVRHyFormer(nn.Module):
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
         )
 
-        # 5. Classifier
+        # 5. Classifier-level time injection
+        time_stats = self._compute_time_stats(seq_time_buckets_list)
+        output = output + self.cls_time_gate * self.cls_time_mlp(time_stats)
+
+        # 6. Classifier
         logits = self.clsfier(output)  # (B, action_num)
         return logits
 
@@ -1865,6 +1911,9 @@ class PCVRHyFormer(nn.Module):
             item_tokens=item_tokens if self.use_item_bridge else None,
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
         )
+
+        time_stats = self._compute_time_stats(seq_time_buckets_list)
+        output = output + self.cls_time_gate * self.cls_time_mlp(time_stats)
 
         logits = self.clsfier(output)
         if return_ns_raw:

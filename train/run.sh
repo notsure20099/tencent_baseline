@@ -3,7 +3,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Exp29_PerHeadTimeBias: per-head temporal bias (num_heads independent time preferences)
+#  Exp44_MultiScaleTime: multi-resolution temporal signals
+#  - coarse_time_bias (8 buckets) + fine temporal_bias (65 buckets) in CrossAttention
+#  - cls_time_mlp: per-domain time stats injected before classifier
+#  ~360 params, no architecture change
 # ══════════════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
