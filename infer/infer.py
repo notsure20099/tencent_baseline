@@ -72,6 +72,7 @@ _FALLBACK_MODEL_CFG = {
     'dense_token_groups': 1,
     'dense_aware_qgen': False,
     'use_time_bias': False,
+    'use_item_type_bias': False,
 }
 
 _FALLBACK_SEQ_MAX_LENS = 'seq_a:256,seq_b:256,seq_c:512,seq_d:512'
@@ -361,6 +362,19 @@ def main() -> None:
         local_candidate = os.path.join(model_dir, os.path.basename(ns_groups_json))
         if os.path.exists(local_candidate):
             ns_groups_json = local_candidate
+
+    # If use_item_type_bias, resolve fid=8 offset from item_int_schema
+    if model_cfg.get('use_item_type_bias'):
+        fid8_offset = None
+        for fid, offset, length in test_dataset.item_int_schema.entries:
+            if fid == 8:
+                fid8_offset = offset
+                break
+        if fid8_offset is not None:
+            model_cfg['item_fid8_offset'] = fid8_offset
+            logging.info(f"Resolved item_fid8_offset={fid8_offset} from schema")
+        else:
+            logging.warning("use_item_type_bias=True but fid=8 not found in item_int_schema")
 
     model = build_model(
         test_dataset,
