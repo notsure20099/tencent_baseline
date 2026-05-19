@@ -536,6 +536,9 @@ Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
          粗粒度 (8 buckets) 和细粒度 (65 buckets) 时间偏置, 分类器入口注入
          显式时间统计。这是 20+ 实验后第一次从"时间表示质量"而非"内容信号"
          角度做优化。
+   36.（Exp44 E1）coarse_time_bias 在 E1 全部激活 (norm 0.6-3.8), seq_c 最高,
+         和 Exp43 item_type_bias 同模式: 样本多的域学得快。但 cls_time_gate
+         E1 已为负 (-0.037), 显式统计 (mean/latest bucket) 被模型拒用。
 
 ═══════════════════════════════════════════════════════════════════════════════
 Exp40: NS Tokenizer Fidelity Diagnosis — embedding 保信息能力诊断
@@ -635,7 +638,19 @@ Exp44: MultiScaleTime — 时间信号的全方位增强
               + cls_time_mlp_norm + cls_time_gate
   假设:       粗粒度时间模式（周/月尺度 vs 天尺度）在 CrossAttention 中互补；
               显式时间统计（均值/最近）在 classifier 入口提供决策级时间上下文。
-  状态:       待训练
+
+  早期信号 (E1):
+    Valid AUC: 0.86350 (标准 E1 水平)
+    coarse_time_bias: 全部 8 个 CrossAttention E1 激活
+      B0: seq_a=1.41 seq_b=1.04 seq_c=3.39 seq_d=1.39
+      B1: seq_a=1.72 seq_b=0.97 seq_c=3.77 seq_d=0.61
+      模式: seq_c 最高 (长序列，样本多梯度大)，和 Exp43 item_type_bias 同模式
+    cls_time_gate: -0.0373 (E1 已为负) ⚠️
+      gate 为负 = 模型在压制显式时间统计模块
+      cls_time_mlp_norm=14.6 说明 MLP 产出强信号但模型在"关掉"它
+    → 方向 1 (coarse_time_bias) 是好信号，方向 3 (cls_time_mlp) 可能无效
+
+  状态:       训练中 (E1 完成，等待后续 epoch)
 
 ═══════════════════════════════════════════════════════════════════════════════
 待实施实验组 (Exp44 之后)
