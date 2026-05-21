@@ -572,7 +572,7 @@ class PCVRParquetDataset(IterableDataset):
 
         result = {
             'user_int_feats': torch.from_numpy(user_int.copy()),
-            'user_dense_feats': torch.from_numpy(user_dense.copy()),
+            'user_dense_feats': torch.cat([torch.from_numpy(user_dense.copy()), torch.zeros(B, 8)], dim=1),
             'item_int_feats': torch.from_numpy(item_int.copy()),
             'item_dense_feats': torch.zeros(B, 0, dtype=torch.float32),
             'label': torch.from_numpy(labels),

@@ -1051,6 +1051,49 @@ class MultiSeqHyFormerBlock(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Feature Interaction Crosses
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HadamardGateCross(nn.Module):
+    def __init__(self, d_model: int, cross_dim: int = 16):
+        super().__init__()
+        self.gate_proj = nn.Linear(d_model, d_model)
+        self.cross_proj = nn.Linear(d_model * 2, cross_dim)
+
+    def forward(self, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        gate = torch.sigmoid(self.gate_proj(u))
+        gated = gate * v
+        return self.cross_proj(torch.cat([u, gated], dim=-1))
+
+
+def _seq_pool(st, mk):
+    vm = (~mk).float().unsqueeze(-1)
+    return (st * vm).sum(dim=1) / vm.sum(dim=1).clamp(min=1)
+
+
+@torch._dynamo.disable
+def _feature_cross_dispatch(
+    up, ip, dp, sp0, sp1, sp2, sp3,
+    cross_iu, cross_id, cross_ud,
+    csi0, csi1, csi2, csi3,
+    csu0, csu1, csu2, csu3,
+    csd0, csd1, csd2, csd3,
+    f0, f1, f2, f3,
+    alpha,
+):
+    c_iu = cross_iu(ip, up)
+    c_id = cross_id(ip, dp)
+    c_ud = cross_ud(up, dp)
+
+    r0 = alpha[0] * f0(torch.cat([csi0(sp0, ip), csu0(sp0, up), csd0(sp0, dp)], dim=-1))
+    r1 = alpha[1] * f1(torch.cat([csi1(sp1, ip), csu1(sp1, up), csd1(sp1, dp)], dim=-1))
+    r2 = alpha[2] * f2(torch.cat([csi2(sp2, ip), csu2(sp2, up), csd2(sp2, dp)], dim=-1))
+    r3 = alpha[3] * f3(torch.cat([csi3(sp3, ip), csu3(sp3, up), csd3(sp3, dp)], dim=-1))
+
+    return c_iu, c_id, c_ud, r0 + r1 + r2 + r3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PCVRHyFormer Main Model
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1101,49 +1144,37 @@ class GroupNSTokenizer(nn.Module):
             for group in groups
         ])
 
-    def forward(self, int_feats: torch.Tensor,
-                return_raw_embeddings: bool = False):
+    def forward(self, int_feats: torch.Tensor) -> torch.Tensor:
         """Embeds and projects grouped discrete features into NS tokens.
 
         Args:
             int_feats: (B, total_int_dim), concatenated integer features.
-            return_raw_embeddings: if True, also return per-fid raw embeddings.
 
         Returns:
-            Tokens of shape (B, num_groups, D), or
-            ((B, num_groups, D), list of (B, emb_dim)) if return_raw_embeddings.
+            Tokens of shape (B, num_groups, D).
         """
         tokens = []
-        all_raw = []
         for group, proj in zip(self.groups, self.group_projs):
             fid_embs = []
             for fid_idx in group:
                 vs, offset, length = self.feature_specs[fid_idx]
                 emb_real_idx = self._emb_index[fid_idx]
                 if emb_real_idx == -1:
-                    # Filtered high-cardinality feature: output zero vector
                     fid_emb = int_feats.new_zeros(int_feats.shape[0], self.emb_dim)
                 else:
                     emb_layer = self.embs[emb_real_idx]
                     if length == 1:
-                        # Single-value feature: direct lookup
-                        fid_emb = emb_layer(int_feats[:, offset].long())  # (B, emb_dim)
+                        fid_emb = emb_layer(int_feats[:, offset].long())
                     else:
-                        # Multi-value feature: lookup then mean pooling (ignoring padding=0)
-                        vals = int_feats[:, offset:offset + length].long()  # (B, length)
-                        emb_all = emb_layer(vals)  # (B, length, emb_dim)
-                        mask = (vals != 0).float().unsqueeze(-1)  # (B, length, 1)
-                        count = mask.sum(dim=1).clamp(min=1)  # (B, 1)
-                        fid_emb = (emb_all * mask).sum(dim=1) / count  # (B, emb_dim)
+                        vals = int_feats[:, offset:offset + length].long()
+                        emb_all = emb_layer(vals)
+                        mask = (vals != 0).float().unsqueeze(-1)
+                        count = mask.sum(dim=1).clamp(min=1)
+                        fid_emb = (emb_all * mask).sum(dim=1) / count
                 fid_embs.append(fid_emb)
-                if return_raw_embeddings:
-                    all_raw.append(fid_emb)
-            cat_emb = torch.cat(fid_embs, dim=-1)  # (B, num_fids*emb_dim)
-            tokens.append(F.silu(proj(cat_emb)).unsqueeze(1))  # (B, 1, D)
-        tokens_out = torch.cat(tokens, dim=1)  # (B, num_groups, D)
-        if return_raw_embeddings:
-            return tokens_out, all_raw
-        return tokens_out
+            cat_emb = torch.cat(fid_embs, dim=-1)
+            tokens.append(F.silu(proj(cat_emb)).unsqueeze(1))
+        return torch.cat(tokens, dim=1)
 
 
 class RankMixerNSTokenizer(nn.Module):
@@ -1519,9 +1550,33 @@ class PCVRHyFormer(nn.Module):
         # Dropout
         self.emb_dropout = nn.Dropout(dropout_rate)
 
-        # Classifier
+        # ================== Feature Interaction Crosses ==================
+        cd = 16
+        self._cross_iu = HadamardGateCross(d_model, cd)
+        self._cross_id = HadamardGateCross(d_model, cd)
+        self._cross_ud = HadamardGateCross(d_model, cd)
+        self._csi0 = HadamardGateCross(d_model, cd)
+        self._csi1 = HadamardGateCross(d_model, cd)
+        self._csi2 = HadamardGateCross(d_model, cd)
+        self._csi3 = HadamardGateCross(d_model, cd)
+        self._csu0 = HadamardGateCross(d_model, cd)
+        self._csu1 = HadamardGateCross(d_model, cd)
+        self._csu2 = HadamardGateCross(d_model, cd)
+        self._csu3 = HadamardGateCross(d_model, cd)
+        self._csd0 = HadamardGateCross(d_model, cd)
+        self._csd1 = HadamardGateCross(d_model, cd)
+        self._csd2 = HadamardGateCross(d_model, cd)
+        self._csd3 = HadamardGateCross(d_model, cd)
+        self._fuse0 = nn.Linear(3 * cd, d_model)
+        self._fuse1 = nn.Linear(3 * cd, d_model)
+        self._fuse2 = nn.Linear(3 * cd, d_model)
+        self._fuse3 = nn.Linear(3 * cd, d_model)
+        self._cross_alpha = nn.Parameter(torch.zeros(4, 1))
+
+        # Classifier (input = d_model + 3*16 + d_model = 176)
+        cls_in = d_model + 3 * cd + d_model
         self.clsfier = nn.Sequential(
-            nn.Linear(d_model, d_model),
+            nn.Linear(cls_in, d_model),
             nn.LayerNorm(d_model),
             nn.SiLU(),
             nn.Dropout(dropout_rate),
@@ -1785,6 +1840,26 @@ class PCVRHyFormer(nn.Module):
             seq_masks_list.append(mask)
             seq_time_buckets_list.append(inputs.seq_time_buckets[domain])
 
+        # --- Feature cross (torch._dynamo.disable, 0 ops traced by compile) ---
+        up = user_ns.mean(dim=1)
+        ip = item_ns.mean(dim=1)
+        dp = dense_tokens.mean(dim=1) if dense_tokens is not None else torch.zeros_like(up)
+
+        sp0 = _seq_pool(seq_tokens_list[0], seq_masks_list[0])
+        sp1 = _seq_pool(seq_tokens_list[1], seq_masks_list[1])
+        sp2 = _seq_pool(seq_tokens_list[2], seq_masks_list[2])
+        sp3 = _seq_pool(seq_tokens_list[3], seq_masks_list[3])
+
+        c_iu, c_id, c_ud, dom_sum = _feature_cross_dispatch(
+            up, ip, dp, sp0, sp1, sp2, sp3,
+            self._cross_iu, self._cross_id, self._cross_ud,
+            self._csi0, self._csi1, self._csi2, self._csi3,
+            self._csu0, self._csu1, self._csu2, self._csu3,
+            self._csd0, self._csd1, self._csd2, self._csd3,
+            self._fuse0, self._fuse1, self._fuse2, self._fuse3,
+            self._cross_alpha,
+        )
+
         # 3. Generate independent Q tokens per sequence via MultiSeqQueryGenerator
         q_tokens_list = self.query_generator(
             ns_tokens, seq_tokens_list, seq_masks_list,
@@ -1800,39 +1875,21 @@ class PCVRHyFormer(nn.Module):
         )
 
         # 5. Classifier
-        logits = self.clsfier(output)  # (B, action_num)
+        output = torch.cat([output, c_iu, c_id, c_ud, dom_sum], dim=-1)
+        logits = self.clsfier(output)
         return logits
 
-    def predict(self, inputs: ModelInput,
-                return_ns_raw: bool = False):
-        """Runs inference without dropout, returning both logits and embeddings.
+    def predict(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Runs inference without dropout, returning both logits and embeddings."""
+        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
+        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
 
-        Args:
-            inputs: model input batch.
-            return_ns_raw: if True, also return per-fid raw NS embeddings
-                (user_raw, item_raw) as lists of (B, emb_dim) tensors.
-
-        Returns:
-            (logits, output) if return_ns_raw=False,
-            (logits, output, user_raw, item_raw) if return_ns_raw=True.
-        """
-        # Reuses forward logic but without dropout
-        if return_ns_raw:
-            user_ns, user_raw = self.user_ns_tokenizer(
-                inputs.user_int_feats, return_raw_embeddings=True)
-            item_ns, item_raw = self.item_ns_tokenizer(
-                inputs.item_int_feats, return_raw_embeddings=True)
-        else:
-            user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
-            item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
-            user_raw = item_raw = None
-
-        item_tokens = item_ns  # item-identity for cross-attn bridging
+        item_tokens = item_ns
 
         dense_tokens = None
         ns_parts = [user_ns]
         if self.has_user_dense:
-            dense_tokens = self._project_dense(inputs.user_dense_feats)  # (B, K, D)
+            dense_tokens = self._project_dense(inputs.user_dense_feats)
             ns_parts.append(dense_tokens)
         ns_parts.append(item_ns)
         if self.has_item_dense:
@@ -1855,6 +1912,25 @@ class PCVRHyFormer(nn.Module):
             seq_masks_list.append(mask)
             seq_time_buckets_list.append(inputs.seq_time_buckets[domain])
 
+        up = user_ns.mean(dim=1)
+        ip = item_ns.mean(dim=1)
+        dp = dense_tokens.mean(dim=1) if dense_tokens is not None else torch.zeros_like(up)
+
+        sp0 = _seq_pool(seq_tokens_list[0], seq_masks_list[0])
+        sp1 = _seq_pool(seq_tokens_list[1], seq_masks_list[1])
+        sp2 = _seq_pool(seq_tokens_list[2], seq_masks_list[2])
+        sp3 = _seq_pool(seq_tokens_list[3], seq_masks_list[3])
+
+        c_iu, c_id, c_ud, dom_sum = _feature_cross_dispatch(
+            up, ip, dp, sp0, sp1, sp2, sp3,
+            self._cross_iu, self._cross_id, self._cross_ud,
+            self._csi0, self._csi1, self._csi2, self._csi3,
+            self._csu0, self._csu1, self._csu2, self._csu3,
+            self._csd0, self._csd1, self._csd2, self._csd3,
+            self._fuse0, self._fuse1, self._fuse2, self._fuse3,
+            self._cross_alpha,
+        )
+
         q_tokens_list = self.query_generator(
             ns_tokens, seq_tokens_list, seq_masks_list,
             dense_tokens=dense_tokens if self.dense_aware_qgen else None,
@@ -1867,7 +1943,6 @@ class PCVRHyFormer(nn.Module):
             seq_time_buckets_list=seq_time_buckets_list if self.use_time_bias else None,
         )
 
+        output = torch.cat([output, c_iu, c_id, c_ud, dom_sum], dim=-1)
         logits = self.clsfier(output)
-        if return_ns_raw:
-            return logits, output, user_raw, item_raw
         return logits, output
